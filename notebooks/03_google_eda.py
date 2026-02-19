@@ -1776,103 +1776,251 @@ plt.show()
 #
 # ## Summary of Findings
 #
-# Complete this section after reviewing all outputs above. The cells below provide
-# a structured template for documenting key findings and decisions.
 
 # %% [markdown]
 # ### 7.1 Dataset Dimensions and Temporal Coverage
 #
-# | Table | Rows | Columns | Size (GB) | Duration (days) |
-# |-------|------|---------|-----------|-----------------|
-# | instance_events_full | ... | ... | ... | ... |
-# | machine_events_full | ... | ... | ... | ... |
-# | instance_usage_full | ... | ... | ... | ... |
-# | collection_events_full | ... | ... | ... | ... |
-# | machine_attributes_full | ... | ... | ... | ... |
+# The Google Cluster Traces v3 dataset consists of four primary tables spanning
+# approximately 31 days of production Borg cluster activity (May 1–31, 2019). The
+# instance_usage table dominates storage at nearly 2 TB, reflecting the granularity of
+# per-instance resource telemetry.
 #
-# *Fill in after running Section 1.*
+# | Table | Rows | Columns | Size (GB) | Duration (days) | Key Coverage |
+# |-------|------|---------|-----------|-----------------|--------------|
+# | instance_events_full | 1,717,317,922 | 12 | 387.45 | 31 days* | 10,005 machines |
+# | instance_usage_full | 7,575,500,668 | 19 | 1,991.83 | 31 days | 2.68M timestamps |
+# | collection_events_full | 20,807,441 | 14 | 3.12 | 31 days | 5.2M collections |
+# | machine_events_full | 46,219 | 7 | 0.01 | 31 days | 10,001 machines |
+#
+# _*instance_events contains sentinel timestamps (0 = before trace, 2⁶³−1 = after trace)
+# requiring filtering._
+#
+# _Note: machine_attributes_full (1,702,926 rows) omitted from main table — used for
+# machine-level feature enrichment only._
+#
+# **Total dataset size:** ~2,382 GB (2.3 TB).
+#
+# **Combined rows:** ~9.3 billion across all tables.
 
 # %% [markdown]
 # ### 7.2 Event Type Distribution and Failure Definition
 #
-# **Question:** Which event types should be labeled as "failure"?
+# The event type distribution reveals the full instance lifecycle. Terminal events
+# (types 4–8) represent lifecycle completion outcomes and are the basis for failure
+# labeling.
 #
-# The literature and Google documentation suggest types 4 (EVICT), 5 (FAIL), and
-# 8 (LOST) as failure candidates. However:
+# | Type | Label | Count | % Total | Category | Terminal? | Failure? |
+# |------|-------|-------|---------|----------|-----------|----------|
+# | 0 | SUBMIT | 352,128,320 | 20.50 | Lifecycle | No | ... |
+# | 1 | QUEUE | 60,959,018 | 3.55 | Lifecycle | No | ... |
+# | 2 | ENABLE | 340,369,139 | 19.82 | Lifecycle | No | ... |
+# | 3 | SCHEDULE | 326,295,154 | 19.00 | Lifecycle | No | ... |
+# | 4 | **EVICT** | 117,133,729 | 6.82 | Terminal | Yes | Conditional |
+# | 5 | **FAIL** | 17,358,057 | 1.01 | Terminal | Yes | Yes |
+# | 6 | **FINISH** | 73,611,983 | 4.29 | Terminal | Yes | No (Success) |
+# | 7 | KILL | 149,277,877 | 8.69 | Terminal | Yes | No (Excluded) |
+# | 8 | **LOST** | 4,351,433 | 0.25 | Terminal | Yes | Yes |
+# | 9 | UPDATE_PENDING | 67,373,803 | 3.92 | Update | No | ... |
+# | 10 | UPDATE_RUNNING | 208,459,409 | 12.14 | Update | No | ... |
 #
-# - **EVICT (4):** Is this always a failure? For low-priority/free-tier tasks,
-#   eviction is expected behavior (preemption by higher-priority tasks). Should
-#   eviction be labeled as failure only for production-priority instances?
-# - **FAIL (5):** Program error or OOM — this is clearly a failure.
-# - **LOST (8):** Missing termination event — likely indicates machine/infra failure.
-# - **KILL (7):** User-initiated cancellation — should this be excluded entirely?
+# #### 7.2.1 EVICT (Type 4) Analysis: Expected Preemption vs. Failure
 #
-# **Decision (to be documented after reviewing data):**
-# - Failure types: [TBD — fill in after reviewing type distributions and priority breakdown]
-# - Justification: [TBD]
-# - Class imbalance ratio: [TBD — computed from event type distribution above]
+# Evictions are overwhelmingly concentrated in low-priority tiers. 93.1% of all
+# evictions occur in Free (≤99) and Best-effort (100–115) priority tiers, where
+# preemption by higher-priority tasks is expected Borg behavior. Only 0.13% of
+# evictions affect Production-priority instances.
+#
+# | Priority Tier | EVICT Count | % of EVICTs | Expected? | Label As |
+# |---------------|-------------|-------------|-----------|----------|
+# | Free (≤99) | 86,104,965 | 73.5% | Yes | Exclude |
+# | Best-effort (100–115) | 22,919,644 | 19.6% | Yes | Exclude |
+# | Mid-tier (116–119) | 134,034 | 0.1% | Borderline | Failure* |
+# | Production (120–359) | 153,105 | 0.1% | No | Failure |
+# | Monitoring (≥360) | 7,821,981 | 6.7% | Partial | TBD† |
+#
+# _*Mid-tier evictions are rare and may represent scheduling anomalies.
+# †Monitoring evictions need further investigation in Phase B._
+#
+# #### 7.2.2 Failure Definition Decision
+#
+# **Primary recommendation (conservative):** Types 5 (FAIL) and 8 (LOST) as failure;
+# Type 6 (FINISH) as success. EVICT excluded from primary model; KILL excluded
+# (user-initiated cancellation, not system failure).
+#
+# **Secondary analysis (sensitivity):** Production-priority EVICTs (type 4, priority
+# ≥120) added as failures in a sensitivity analysis to test whether production
+# evictions exhibit distinct predictive patterns.
+#
+# **Justification:**
+# - FAIL (type 5) represents unambiguous program errors or OOM conditions — clearly a
+# system failure.
+# - LOST (type 8) indicates missing termination events, likely infrastructure failures
+# — the system lost track of the instance.
+# - EVICT (type 4) is predominantly expected preemption for low-priority workloads
+# (93.1% in Free/Best-effort tiers). Labeling all evictions as failures would conflate
+# intentional scheduling decisions with genuine failures.
+# - KILL (type 7) represents user-initiated cancellation, not predictable system
+# behavior.
+#
+# **Class imbalance (primary definition):** FINISH: 73,611,983 vs. FAIL+LOST: 21,709,490
+# — a 3.4:1 success-to-failure ratio. This is moderate imbalance, manageable with SMOTE,
+# cost-sensitive learning, or ensemble balancing without extreme oversampling
+# (Li et al., 2021).
+
 
 # %% [markdown]
 # ### 7.3 Null Patterns and Imputation Strategy
 #
-# **Key findings from null analysis:**
-# - [TBD — which columns have high null rates?]
-# - [TBD — are nulls structural (e.g., no machine_id before scheduling) or random?]
+# Null analysis reveals that missingness in the instance_events table is predominantly
+# structural (lifecycle-dependent), not random.
 #
-# **Preliminary imputation strategy:**
-# - Structural nulls: [TBD — e.g., filter to relevant lifecycle stages]
-# - Random nulls: [TBD — e.g., mean/median imputation, or exclude columns above X% null]
+# | Event Type | machine_id %null | cpu_req %null | mem_req %null | sched_class | priority | Total Rows |
+# |------------|------------------|---------------|---------------|-------------|----------|------------|
+# | SUBMIT (0) | 95.48 | 0.01 | 0.01 | 0.0 | 0.0 | 352M |
+# | QUEUE (1) | 99.62 | 0.0 | 0.0 | 0.0 | 0.0 | 61M |
+# | ENABLE (2) | 96.78 | 0.0 | 0.0 | 0.0 | 0.0 | 340M |
+# | SCHEDULE (3) | 0.0 | 0.0 | 0.0 | 0.0 | 0.0 | 326M |
+# | EVICT (4) | 0.0 | 0.0 | 0.0 | 0.0 | 0.0 | 117M |
+# | FAIL (5) | 0.0 | 0.0 | 0.0 | 0.0 | 0.0 | 17M |
+# | FINISH (6) | 4.52 | 0.0 | 0.0 | 0.0 | 0.0 | 74M |
+# | KILL (7) | 20.08 | 0.0 | 0.0 | 0.0 | 0.0 | 149M |
+# | LOST (8) | 2.59 | 0.0 | 0.0 | 0.0 | 0.0 | 4M |
+#
+# **Key finding:** machine_id nulls are structural. Pre-scheduling events (SUBMIT,
+# QUEUE, ENABLE) have 95–99% null machine_id because no machine has been assigned yet.
+# Post-scheduling events (SCHEDULE, EVICT, FAIL) have near-zero null machine_id. This
+# is not missing data — it reflects the instance lifecycle.
+#
+# **Imputation Strategy**
+# - **Structural nulls (machine_id):** Do NOT impute. Filter to post-scheduling events
+# (types 3–8) when machine_id is needed for analysis. For failure prediction, the
+# relevant events (SCHEDULE → terminal) have complete machine_id.
+# - **cpu_request / memory_request:** 47,933 nulls out of 1.7B rows (0.003%). These can
+# be safely dropped or imputed with median values. Negligible impact on analysis.
+# - **instance_usage nulls:** sample_memory is 100% null across all 7.5B rows — this
+# column should be dropped entirely. max_memory has 0.57% null. cycles_per_instruction
+# and memory_accesses_per_instruction are 20.5% null — investigate whether these are
+# structurally missing (certain instance types do not report these metrics).
+# - **collection_events nulls:** max_per_machine (99.3% null) and max_per_switch
+# (99.7% null) should be dropped. parent_collection_id (36% null) may indicate top-level
+# collections without parents.
+
 
 # %% [markdown]
 # ### 7.4 Temporal Patterns and Train/Test Splitting
 #
-# **Key findings from temporal analysis:**
-# - [TBD — are there diurnal patterns? Weekly patterns?]
-# - [TBD — any anomalous periods that should be excluded or treated specially?]
+# **Coverage:** All tables span approximately 31 days (May 1–31, 2019). The
+# instance_usage table has the cleanest temporal boundaries, with start_time ranging
+# from 300,000,000 to 2,678,999,000,000 microseconds.
 #
-# **Implications for train/test splitting:**
-# - [TBD — should split be temporal (train on first N days, test on last M days)?]
-# - [TBD — does seasonal pattern suggest stratified temporal sampling?]
+# **Sentinel values in instance_events:** The time column contains values of 0 (event
+# occurred before trace start) and 2⁶³−1 (event occurred after trace end). These must
+# be filtered or handled as censored observations in temporal analysis.
+#
+# **Machine events:** 46,219 events across 31 days, covering 10,001 unique machines.
+# Machine ADD (27,777), REMOVE (17,941), and UPDATE (501) events capture cluster
+# topology changes.
+#
+# **Implications for Train/Test Splitting**
+# - **Temporal split required:** Random splitting would leak future information. The
+# recommended approach is chronological partitioning: approximately 70% train
+# (days 1–22), 15% validation (days 22–26), 15% test (days 26–31).
+# - **Blocked temporal cross-validation:** For hyperparameter tuning, use expanding or
+# sliding window CV within the training period to respect temporal ordering
+# (Bergmeir & Benítez, 2012).
+# - **Open question:** Are there diurnal or weekly patterns in event density? This needs
+# to be investigated in Phase B temporal analysis to determine whether stratified
+# temporal sampling is warranted.
 
 # %% [markdown]
 # ### 7.5 Resource and Utilization Patterns
 #
+# Resource requests and utilization are expressed as normalized values [0, 1] relative
+# to the largest machine in the cluster.
+#
+# | Metric | Mean | Median | P25 | P75 | P95 | P99 |
+# |--------|------|--------|-----|-----|-----|-----|
+# | cpu_request | 0.0127 | 0.0088 | 0.0041 | 0.0162 | 0.0257 | 0.0599 |
+# | memory_request | 0.0073 | 0.0043 | 0.0018 | 0.0093 | 0.0229 | 0.0327 |
+# | avg_cpu (usage) | 0.0008 | 0.0008 | 0.0002 | 0.0067 | 0.0288 | 0.0598 |
+# | avg_memory (usage) | 0.0018 | 0.0018 | 0.0008 | 0.0045 | 0.0148 | 0.0341 |
+# | max_cpu (usage) | 0.0071 | 0.0071 | 0.0012 | 0.0247 | 0.0936 | 0.2031 |
+# | max_memory (usage) | 0.0019 | 0.0019 | 0.0008 | 0.0050 | 0.0169 | 0.0344 |
+#
 # **Key findings:**
-# - [TBD — are resources over/under-provisioned?]
-# - [TBD — do failure instances have different utilization profiles?]
-# - [TBD — are resource requests predictive of failures?]
+# - Resources are heavily right-skewed: median CPU request is 0.88% of maximum machine
+# capacity, and median memory request is 0.43%. Most instances request very small
+# resource slices.
+# - Actual CPU utilization (avg_cpu) is extremely low — median 0.08%, suggesting
+# substantial over-provisioning. The gap between requested and utilized resources may
+# be a strong failure predictor.
+# - max_cpu shows a wider spread (P99 = 20.3%), indicating occasional burst usage. CPU
+# burst patterns may differentiate failure-bound instances.
+# - FAIL events have the highest average resource requests among terminal events
+# (avg CPU 0.0105, avg memory 0.0085 at the event level), suggesting that resource
+# pressure correlates with failure.
 
 # %% [markdown]
 # ### 7.6 Machine-Level Patterns
 #
+# Machine events and platform diversity reveal the cluster's physical infrastructure.
+#
+# | Platform | Machines | Avg CPU Cap | Avg Mem Cap | Total Failures | Avg Fail/Mach | Fail Density |
+# |--------|----------|-------------|-------------|----------------|---------------|--------------|
+# | Platform A | 3,685 | 0.592 | 0.321 | 42,415,480 | 11,433 | High |
+# | Platform B | 2,358 | 0.996 | 0.603 | 55,786,398 | 21,293 | Very High |
+# | Platform C | 1,864 | 0.709 | 0.425 | 28,418,787 | 14,981 | High |
+# | Platform D | 1,763 | 0.387 | 0.272 | 12,098,751 | 6,820 | Moderate |
+#
+# _Note: Platform IDs are hashed. Labels (A–D) assigned by machine count for readability._
+#
 # **Key findings:**
-# - [TBD — are failures concentrated on specific machines?]
-# - [TBD — do certain platforms or capacity tiers have higher failure rates?]
-# - [TBD — how much machine churn exists?]
+# - Platform B (highest-capacity machines, avg CPU 0.996) has the highest failure density
+# at 21,293 failures per machine. This counterintuitive finding suggests that larger
+# machines may run more instances or more failure-prone workloads.
+# - Four distinct hardware platforms serve approximately 9,670 machines. Platform A has
+# the most machines (3,685) but not the highest per-machine failure rate.
+# - Machine churn is moderate: 27,777 ADD events and 17,941 REMOVE events over 31 days.
+# Machine-level features (time-since-add, failure history) are feasible.
+# - Machine capacity varies substantially (CPU capacity ranges 0.387–1.0), suggesting
+# heterogeneous hardware that may interact with failure patterns.
 
 # %% [markdown]
 # ### 7.7 Open Questions for Phase B
 #
-# 1. [TBD — questions that need deeper investigation or preprocessing work]
-# 2. [TBD]
-# 3. [TBD]
+# 1. **Diurnal and weekly temporal patterns:** Do event densities and failure rates vary by
+# time of day or day of week? This determines whether temporal features (hour, weekday)
+# are informative and whether temporal stratification is needed in the train/test split.
+# 2. **Monitoring-tier evictions:** The 7.8M monitoring-priority evictions (6.7% of all
+# EVICTs) need investigation. Are these health-check or canary processes that are
+# intentionally short-lived, or do they represent genuine infrastructure issues?
+# 3. **Instance lifecycle reconstruction:** Can we reconstruct full instance lifecycles
+# (SUBMIT → SCHEDULE → terminal) to extract duration and transition features? How many
+# instances have clean lifecycle sequences vs. gaps?
+# 4. **Usage–failure correlation:** Do instances that eventually fail exhibit different
+# utilization profiles (CPU bursts, memory ramps) in the time windows before failure?
+# This is the core predictive signal for RQ1.
+# 5. **Collection-level failure patterns:** Are failures concentrated in certain
+# collections? Collection-type 0 dominates (99.3% of events). Is collection_type
+# informative or essentially constant?
+# 6. **Cycles_per_instruction and memory_accesses_per_instruction:** These usage metrics
+# are 20.5% null. Is missingness correlated with instance type, scheduling class, or
+# failure outcome? Could these be strong predictors if properly handled?
+# 7. **Sentinel timestamp handling:** How many instances have time=0 or time=MAX_INT64?
+# These represent censored observations. Should they be excluded, or can they be handled
+# as left/right-censored data?
 
 # %% [markdown]
 # ### 7.8 Preliminary Decisions Log
 #
-# | Decision | Choice | Evidence | Notebook Section | Literature Support |
-# |----------|--------|----------|------------------|--------------------|
-# | Failure event types | TBD | Section 2.1, 2.2 | 03, Sec 2 | Wilkes et al. (2020) |
-# | Class imbalance strategy | TBD | Section 2.1 | 03, Sec 2 | Chicco & Jurman (2023) |
-# | Null handling approach | TBD | Section 2.3 | 03, Sec 2 | — |
-# | Temporal split strategy | TBD | Section 2.4 | 03, Sec 2 | — |
-# | Machine-level features | TBD | Section 3, 6 | 03, Sec 3/6 | Zhang et al. (2023) |
+# | Decision | Choice | Evidence | Notebook | Literature |
+# |----------|--------|----------|----------|------------|
+# | Failure event types | Types 5 (FAIL) + 8 (LOST); sensitivity: add production EVICTs | Sec 7.2: 93% EVICTs are Free/Best-effort | 03, Sec 2 | Google (2019); Cheng et al. (2022) |
+# | Class imbalance strategy | SMOTE + cost-sensitive learning; 3.4:1 ratio manageable | Sec 7.2: 73.6M success vs 21.7M failure | 03, Sec 2 | Li et al. (2021) |
+# | Null handling: machine_id | Do NOT impute; filter to post-scheduling events when needed | Sec 7.3: Structural nulls (95–99%) for pre-scheduling events | 03, Sec 2 | — |
+# | Null handling: resources | Drop or median-impute 47,933 rows (0.003% null) | Sec 7.3: Negligible null rate | 03, Sec 2 | — |
+# | Null handling: usage cols | Drop sample_memory (100% null); investigate CPI/MAPI (20.5%) | Sec 7.3: sample_memory is empty | 03, Sec 2 | — |
+# | Temporal split | Chronological: 70/15/15 train/val/test; blocked temporal CV | Sec 7.4: 31-day coverage | 03, Sec 2 | Bergmeir & Benítez (2012); Raschka (2018) |
+# | Machine features | Include platform, capacity, failure history, churn metrics | Sec 7.6: Platform correlates with failure density | 03, Sec 3/6 | Zhang et al. (2023) |
+# | KILL handling | Exclude entirely (user-initiated, not predictable) | Sec 7.2: Type 7 is cancellation | 03, Sec 2 | Google (2019) |
 
-# %% [markdown]
-# ---
-# ## Next Steps
-#
-# After completing this notebook:
-# 1. Fill in all [TBD] fields in Section 7 based on the data
-# 2. Proceed to `04_backblaze_ingest.py` for Backblaze data pipeline
-# 3. The findings here will inform preprocessing decisions in Phase B
