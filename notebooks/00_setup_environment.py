@@ -6,7 +6,7 @@
 #       extension: .py
 #       format_name: percent
 #       format_version: '1.3'
-#       jupytext_version: 1.16.0
+#       jupytext_version: 1.19.1
 #   kernelspec:
 #     display_name: Python 3
 #     language: python
@@ -18,12 +18,28 @@
 #
 # Run this notebook at the start of every Colab session.
 # It installs dependencies, mounts Drive, sets up paths, and verifies connectivity.
+#
+# **Prerequisites — Colab Secrets (set once in the Colab UI):**
+# - `GCP_PROJECT_ID` — your Google Cloud project ID
+# - `GITHUB_PAT` — a GitHub personal access token with repo scope
 
 # %% [markdown]
 # ## Install Dependencies
 
 # %%
 # !pip install -q polars google-cloud-bigquery db-dtypes
+
+# %% [markdown]
+# ## Load Colab Secrets
+
+# %%
+from google.colab import userdata
+
+PROJECT_ID = userdata.get('GCP_PROJECT_ID')
+GITHUB_PAT = userdata.get('GITHUB_PAT')
+
+print(f"GCP Project: {PROJECT_ID}")
+print(f"GitHub PAT:  {'*' * len(GITHUB_PAT)}")
 
 # %% [markdown]
 # ## Mount Google Drive
@@ -38,8 +54,10 @@ drive.mount('/content/drive')
 # %%
 import os
 
-REPO_URL = 'https://github.com/YOUR-USERNAME/Dissertation-LebelN.git'
-REPO_DIR = '/content/Dissertation-LebelN'
+REPO_OWNER = 'YOUR-USERNAME'
+REPO_NAME = 'Dissertation-LebelN'
+REPO_URL = f'https://{GITHUB_PAT}@github.com/{REPO_OWNER}/{REPO_NAME}.git'
+REPO_DIR = f'/content/{REPO_NAME}'
 
 if os.path.exists(REPO_DIR):
     # !cd {REPO_DIR} && git pull
@@ -78,7 +96,6 @@ auth.authenticate_user()
 
 from google.cloud import bigquery
 
-PROJECT_ID = 'YOUR-PROJECT-ID-HERE'
 bq_client = bigquery.Client(project=PROJECT_ID)
 
 # %% [markdown]
