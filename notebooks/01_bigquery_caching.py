@@ -308,5 +308,3 @@ print(f"Summary saved to: {output_path}")
 # All 5 tables are now cached in `dissertation_lebel`. Subsequent queries against
 # these tables are free (querying your own dataset, not the public one).
 #
-# Proceed to **02_initial_profiling.py** for a quick schema/null/stats survey
-# across all cached tables.
