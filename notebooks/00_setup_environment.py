@@ -54,7 +54,7 @@ drive.mount('/content/drive')
 # %%
 import os
 
-REPO_OWNER = 'YOUR-USERNAME'
+REPO_OWNER = 'NU-Academics'
 REPO_NAME = 'Dissertation-LebelN'
 REPO_URL = f'https://{GITHUB_PAT}@github.com/{REPO_OWNER}/{REPO_NAME}.git'
 REPO_DIR = f'/content/{REPO_NAME}'
