@@ -1025,9 +1025,9 @@ save_table(class_imbalance_df, 'class_imbalance')
 #
 # 1. **Five tables**, ~9.3B rows total, 31-day trace (May 2019).
 # 2. **Structural nulls** dominate missingness: `machine_id` (48%) is null for
-#    pre-scheduling events (types 0–2) — not missing data, but absent by design.
-# 3. **100% null column:** `sample_memory` in `instance_usage_full` — never collected.
-#    Will be dropped in Phase B.
+#    pre-scheduling events (types 0–2) -  not missing data, but absent by design.
+# 3. **100% null column:** `sample_memory` in `instance_usage_full`-  never collected.
+#    Will be dropped in Phase 3.
 # 4. **MNAR pattern:** `cycles_per_instruction` and `memory_accesses_per_instruction`
 #    are 20.5% null — workload-type dependent (MNAR). Requires indicator encoding,
 #    not standard imputation.
@@ -1043,7 +1043,7 @@ save_table(class_imbalance_df, 'class_imbalance')
 # 3. **Core columns** (`date`, `serial_number`, `model`, `capacity_bytes`, `failure`)
 #    are fully populated across all files.
 # 4. **Class imbalance:** Extreme at the daily-observation level (failure is a
-#    rare daily event). Drive-level aggregation in Phase B will reframe the ratio.
+#    rare daily event). Drive-level aggregation in Phase 3 will reframe the ratio.
 #
 # ### Cross-Dataset Comparison
 #

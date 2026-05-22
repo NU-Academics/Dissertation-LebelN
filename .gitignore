@@ -21,17 +21,19 @@ env/
 .vscode/
 *.swp
 *.swo
+.pytest_cache/
+pytest-cache*/
+.ruff_cache/
 
-# Environment / secrets
+# Environment and secrets (do not commit credentials)
 .env
 .env.*
 *.key
 *.pem
 service-account*.json
 
-# Data files — never commit raw data
+# Data files (never commit raw data)
 *.parquet
-*.csv
 *.tsv
 *.pkl
 *.pickle
@@ -39,18 +41,22 @@ service-account*.json
 *.hdf5
 data/
 
-# Outputs — generated artifacts (keep .gitkeep)
+# CSV files: ignore by default, but allow specific audit-trail artifacts
+*.csv
+
+# Outputs: ignore generated artifacts, but keep the directory structure
+# (.gitkeep) and the explicit committee-visible artifacts.
 outputs/tables/*
 outputs/figures/*
 !outputs/.gitkeep
 !outputs/tables/.gitkeep
 !outputs/figures/.gitkeep
 
+# Scratch / temp: ignore by default
+scratch/*
+tmp/
+temp/
+
 # OS
 .DS_Store
 Thumbs.db
-
-# Scratch / temp
-scratch/
-tmp/
-temp/

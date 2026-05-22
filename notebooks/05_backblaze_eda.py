@@ -1636,7 +1636,7 @@ print(comparison.to_pandas().to_string(index=False))
 #
 # > **Notebook:** `05_backblaze_eda.py`
 # > **Date:** February 2026
-# > **Purpose:** Synthesize all EDA outputs from Sections 1–6 into actionable findings for Chapter 3 methodology and Phase B pipeline decisions.
+# > **Purpose:** Synthesize all EDA outputs from Sections 1–6 into actionable findings for Chapter 3 methodology and Phase 3 pipeline decisions.
 
 # %% [markdown]
 # ### 7.1 Dataset Dimensions
@@ -1903,7 +1903,7 @@ print(comparison.to_pandas().to_string(index=False))
 # 4. **Complementary research value:** The two datasets represent opposing poles of failure prediction: rapid, software-driven crashes vs. slow, hardware-driven degradation. Demonstrating that an ensemble framework can adapt to both failure modes (via domain-specific feature engineering and architecture selection) strengthens the generalizability claim of the dissertation.
 
 # %% [markdown]
-# ### 7.7 Open Questions for Phase B
+# ### 7.7 Open Questions for Phase 3
 #
 # 1. **Non-zero frequency features:** Given the zero-inflation in SMART 197, 5, and 198, should binary indicators ("has_nonzero_smart_197") be engineered alongside raw values and rolling statistics? Are the upper quantiles (p90, p95, p99) more discriminative than medians or means for these attributes?
 #

@@ -1665,8 +1665,8 @@ plt.show()
 # %% [markdown]
 # *Figure 6.1a shows the relationship between machine capacity and failure count.
 # If certain capacity tiers have more failures, machine capacity is a useful
-# feature. However, higher-capacity machines may simply run more instances —
-# normalize by instance count in Phase B if needed.*
+# feature. However, higher-capacity machines may simply run more instances -
+# normalize by instance count in Phase 3 if needed.*
 
 # %% [markdown]
 # Failure rate by platform_id.
@@ -1839,7 +1839,7 @@ plt.show()
 # | Monitoring (≥360) | 7,821,981 | 6.7% | Partial | TBD† |
 #
 # _*Mid-tier evictions are rare and may represent scheduling anomalies.
-# †Monitoring evictions need further investigation in Phase B._
+# †Monitoring evictions need further investigation in Phase 3._
 #
 # #### 7.2.2 Failure Definition Decision
 #
@@ -1929,7 +1929,7 @@ plt.show()
 # sliding window CV within the training period to respect temporal ordering
 # (Bergmeir & Benítez, 2012).
 # - **Open question:** Are there diurnal or weekly patterns in event density? This needs
-# to be investigated in Phase B temporal analysis to determine whether stratified
+# to be investigated in Phase 3 temporal analysis to determine whether stratified
 # temporal sampling is warranted.
 
 # %% [markdown]
@@ -1986,7 +1986,7 @@ plt.show()
 # heterogeneous hardware that may interact with failure patterns.
 
 # %% [markdown]
-# ### 7.7 Open Questions for Phase B
+# ### 7.7 Open Questions for Phase 3
 #
 # 1. **Diurnal and weekly temporal patterns:** Do event densities and failure rates vary by
 # time of day or day of week? This determines whether temporal features (hour, weekday)
