@@ -6,7 +6,7 @@
 #       extension: .py
 #       format_name: percent
 #       format_version: '1.3'
-#       jupytext_version: 1.19.1
+#       jupytext_version: 1.19.3
 #   kernelspec:
 #     display_name: Python 3
 #     language: python
@@ -562,28 +562,3 @@ print(f"File size: {DECISIONS_CSV.stat().st_size:,} bytes")
 # When any of these gets resolved, append a new Validated entry to the CSV
 # referencing the resolution; do not amend the Open entry (the audit trail
 # preserves the original framing of the question).
-
-# %% [markdown]
-# ## 6. Phase 2 to Phase 3 handoff checklist
-#
-# Confirm these before declaring Week 1 complete:
-#
-# - [x] All Phase 2 notebooks (00-06) executed and findings validated.
-# - [x] Three Google follow-up queries executed (pre-failure utilization,
-#       lifecycle reconstruction, CPI/MAPI missingness).
-# - [x] Failure definitions resolved (primary FAIL+LOST; sensitivity Production
-#       EVICT).
-# - [x] Class imbalance characterized for both datasets.
-# - [x] Tier structure for features established.
-# - [P] Working-set sizing strategy committed in DP (50-100M Google; ~3.13M
-#       Backblaze at 100:1). Learning-curve validation is planned for Phase 3.
-# - [x] Temporal split strategy committed (V06 + V20).
-# - [x] Decisions log materialized to outputs/tables/eda_decisions.csv with
-#       three-status categorization (Validated / Planned / Open).
-# - [ ] Phase 3 src/ skeleton in place (verify `src/preprocessing/`,
-#       `src/features/`, `src/data/`, `src/models/`, `src/evaluation/` exist
-#       with `__init__.py` files).
-# - [ ] requirements.txt updated for Phase 3.
-# - [ ] BigQuery cached tables verified accessible.
-#
-# When every item is checked, Phase 3 begins.
