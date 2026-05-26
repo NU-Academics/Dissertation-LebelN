@@ -41,19 +41,21 @@ service-account*.json
 *.hdf5
 data/
 
-# CSV files: ignore by default, but allow specific audit-trail artifacts
+# CSV files: ignore by default, but allow the audit-trail artifact
 *.csv
+!outputs/tables/eda_decisions.csv
 
 # Outputs: ignore generated artifacts, but keep the directory structure
-# (.gitkeep) and the explicit committee-visible artifacts.
+# and the committee-visible audit-trail CSV.
 outputs/tables/*
 outputs/figures/*
 !outputs/.gitkeep
 !outputs/tables/.gitkeep
 !outputs/figures/.gitkeep
+!outputs/tables/eda_decisions.csv
 
-# Scratch / temp: ignore by default
-scratch/*
+# Scratch: local notes only, not committed
+scratch/
 tmp/
 temp/
 
