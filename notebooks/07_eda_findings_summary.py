@@ -444,7 +444,7 @@ DECISIONS = [
      "RQ1, RQ2, RQ3, RQ4, RQ5", "Planned (DP)", "Completed Phase 6 Week 11"),
 
     ("P19", "Regeneration Pipeline", "Both", "Single Notebook 19 regenerates every Chapter 4 table and figure from result Parquets",
-     "Hermetic regeneration prevents drift between draft prose and source artifacts", "Phase 6 guide",
+     "Hermetic regeneration prevents drift between draft prose and source artifacts", "Phase 6",
      "RQ1, RQ2, RQ3, RQ4, RQ5", "Planned (DP)", "Built Phase 6 Week 11"),
 
     # --- OPEN: questions still under investigation, from notebook 03 Sec 7.7 (4 remaining) ---
