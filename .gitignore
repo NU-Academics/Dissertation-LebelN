@@ -33,6 +33,7 @@ pytest-cache*/
 service-account*.json
 
 # Data files (never commit raw data)
+# keep the data folder in the python modules though since that's data code, not data itself
 *.parquet
 *.tsv
 *.pkl
@@ -40,6 +41,7 @@ service-account*.json
 *.h5
 *.hdf5
 data/
+!src/data/
 
 # CSV files: ignore by default, but allow the audit-trail artifact
 *.csv
@@ -49,6 +51,7 @@ data/
 # and the committee-visible audit-trail CSV.
 outputs/tables/*
 outputs/figures/*
+outputs/preprocessed/*
 !outputs/.gitkeep
 !outputs/tables/.gitkeep
 !outputs/figures/.gitkeep

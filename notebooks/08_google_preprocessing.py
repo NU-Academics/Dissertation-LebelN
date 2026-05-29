@@ -612,7 +612,7 @@ record_check(
 #
 # Build a per-instance summary table joining SUBMIT, SCHEDULE, and
 # terminal events. Pushed to BigQuery as a single window-function pass
-# (Risk R1: never pulls the full 1.7B-row events table into Polars).
+# (never pulls the full 1.7B-row events table into Polars).
 # The output schema must expose `submit_time` so
 # `src/features/temporal.py` (V26) can derive PDT wall-clock
 # components.
