@@ -19,7 +19,7 @@ The proposal defended successfully in May 2026. The analysis is now in the Chapt
 
 - **Phase 1 (Business Understanding):** Complete (covered in Dissertation Proposal Chapter 1).
 - **Phase 2 (Data Understanding):** Complete. Five cached BigQuery tables, three Google follow-up queries, full Backblaze EDA, data-quality summary, and `notebooks/07_eda_findings_summary.py` consolidating the preliminary decisions log.
-- **Phase 3 (Data Preparation):** Active. Preprocessing and tiered feature engineering for both datasets; working-set construction with learning-curve adequacy evidence.
+- **Phase 3 (Data Preparation):** Active. **Week 2 (Google preprocessing) complete:** `notebooks/07b_phase3_front_loaded_eda.py` and `notebooks/08_google_preprocessing.py` validated, four `src/` modules extracted (`src/preprocessing/google_traces.py`, `src/preprocessing/lifecycle.py`, `src/data/schemas.py`, `src/data/validation.py`), Polars-native unit tests passing, and decisions log rows V25-V29 appended. **Week 3 (Google feature engineering + working-set construction) is the active focus:** tiered feature derivation, the collection-level sampler, and the learning-curve adequacy harness. Per-directory READMEs are in place at `notebooks/`, `src/` (and every subpackage), `tests/`, `utils/`, and `sql/`.
 - **Phase 4 (Modeling):** Per-RQ ensemble and classifier training with temporal cross-validation and Bayesian hyperparameter tuning.
 - **Phase 5 (Evaluation):** Cross-cutting hypothesis testing with family-wise error control, SHAP interpretability, sensitivity analyses, feature ablation.
 - **Phase 6 (Deployment):** Tables/figures regeneration pipeline, TRIPOD+AI checklist, Chapter 4 reporting.

@@ -40,8 +40,7 @@ duration features (queue time, running duration, resubmission count).
   vs. KILL): queue time, running duration, resubmission count.
 - **C:** Resubmission count vs. eventual failure rate (does resubmission predict
   failure?).
-- **D:** Running duration distribution bucketed by time scale (<1s, 1-10s, ...
-  >1day) for FAIL vs. FINISH (early crash vs. slow degradation?).
+- **D:** Running duration distribution bucketed by time scale (<1s, 1-10s, >1day) for FAIL vs. FINISH (early crash vs. slow degradation?).
 
 **Decides:** Whether lifecycle-derived features are extractable at scale and carry
 signal. Directly shapes feature engineering (Section 3.5.4) and determines
