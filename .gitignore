@@ -52,6 +52,7 @@ data/
 outputs/tables/*
 outputs/figures/*
 outputs/preprocessed/*
+outputs/features/*
 !outputs/.gitkeep
 !outputs/tables/.gitkeep
 !outputs/figures/.gitkeep
