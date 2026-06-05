@@ -4,7 +4,7 @@ Phase 3 (Data Preparation) deliverables. Tiered feature construction per the
 EDA-validated priority structure (Tier 1 historical/scheduling > Tier 2
 slope/runtime > Tier 3 windowed utilization).
 
-Planned submodules (created during Weeks 3 and 7):
+Planned submodules:
 - historical: Tier 1 lifecycle-derived features for Google Cluster Traces
   (prior_fail_count, resubmission_count, has_prior_fail, prior_evict_count).
 - scheduling: Tier 1 scheduling features (priority_tier, scheduling_class,
@@ -18,4 +18,48 @@ Planned submodules (created during Weeks 3 and 7):
   construction. Full failure preservation per the Ch. 3 Sampling Strategy.
 - conflict_labels: RQ2 conflict-type labelers (resource contention, priority
   inversion, scheduling violations) and outcome labels.
+
+Google Tier 1/2/3 modules were extracted from
+``notebooks/10_feature_engineering_google.py`` after the feature logic was
+validated against the working set (35,133,137 instances). Each module exposes
+pure ``LazyFrame -> LazyFrame`` transforms; the Tier 2/3 modules additionally
+expose BigQuery SQL builders capturing the validated at-scale production path.
 """
+
+from src.features.conflict_labels import label_conflicts
+from src.features.historical import (
+    add_historical_features,
+    add_lifecycle_position,
+)
+from src.features.runtime import (
+    add_runtime_features,
+    build_runtime_features_sql,
+    build_usage_working_set_sql,
+)
+from src.features.scheduling import (
+    add_hardware_counter_flag,
+    add_scheduling_features,
+    platform_suffix_map,
+    priority_tier_expr,
+)
+from src.features.temporal import add_temporal_features
+from src.features.utilization import (
+    add_windowed_utilization,
+    build_windowed_utilization_sql,
+)
+
+__all__ = [
+    "add_historical_features",
+    "add_lifecycle_position",
+    "add_scheduling_features",
+    "add_hardware_counter_flag",
+    "priority_tier_expr",
+    "platform_suffix_map",
+    "add_temporal_features",
+    "add_runtime_features",
+    "build_usage_working_set_sql",
+    "build_runtime_features_sql",
+    "add_windowed_utilization",
+    "build_windowed_utilization_sql",
+    "label_conflicts",
+]
