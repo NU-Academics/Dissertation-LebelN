@@ -666,7 +666,7 @@ tier1_out_lf = tier1_lf.select(KEY_COLS + LABEL_COLS + TIER1_FEATURE_COLS)
 # Validate Tier 1 before the expensive Tier 2 BigQuery work. With the
 # Section 2 pushdown there is no group_by upstream, so the streaming engine
 # evaluates this bounded slice without materializing the full working set.
-tier1_probe = tier1_out_lf.head(100_000).collect(streaming=True)
+tier1_probe = tier1_out_lf.head(100_000).collect(engine="streaming")
 print(f"Tier 1 probe shape: {tier1_probe.shape}")
 print(tier1_probe.select(["failure_label", "has_prior_fail", "first_resubmission",
                           "priority_tier_production", "submit_is_business_hours_pdt"]).head())
@@ -1312,8 +1312,770 @@ print("Tier 3 avg_cpu_5min availability (non-null fraction):",
       1 - smoke["avg_cpu_5min"].null_count() / smoke.height)
 
 # %% [markdown]
-# **Next steps.** Extract each tier section into the
-# matching `src/features/*.py` module as pure LazyFrame -> LazyFrame
-# functions; build `src/features/sampling.py` to produce the locked
-# `working_set_instance_ids`; run the learning-curve
-# harness and the formal Tier 3 inversion guard on this matrix (notebook 11).
+# ---
+# ## 11. Episode-grain reconstruction (per-attempt redesign)
+#
+# **Why this part exists.** Sections 2-10 build the matrix at the *instance*
+# grain (one row per instance, terminal outcome as the label). Notebook 11's
+# prediction-point ablation showed that grain leaks: an at-submission +
+# lifecycle-history model scored MCC ~0.93, far above what pre-event signals
+# can legitimately deliver, because the instance-grain history features
+# (`prior_fail_count`, `resubmission_count`) are computed over the *whole*
+# lifecycle, including the very resubmissions that lead to the terminal label.
+# The history therefore peeks at the outcome.
+#
+# The fix is to model at the *scheduled-episode* grain. An episode is one
+# `sched_seq` group: the events from a SCHEDULE up to (but not into) the next
+# SCHEDULE. Each scheduled run gets its own row, its own terminal, and history
+# computed **strictly from prior episodes only**. This removes the peek and, as
+# notebook 11b confirmed, also rebalances the classes (episode-grain neg:pos is
+# ~4.6:1 versus ~78:1 at the instance grain).
+#
+# **What 11b established (locked rules).**
+# - Episode = `sched_seq` group with at least one SCHEDULE. `sched_seq` is the
+#   running count of SCHEDULE events within an instance (the construction from
+#   notebook 11b Section 3).
+# - Terminal = first terminal-type event in the group. FAIL/LOST -> positive,
+#   FINISH -> negative, EVICT/KILL excluded (V01, V08, V27). 99.1% of failures
+#   are post-schedule, so the episode grain captures them cleanly.
+# - Open episodes (scheduled, no terminal before the trace ends; ~1.2%) are
+#   dropped as right-censored trace-boundary truncation.
+# - Multi-terminal episodes (~5.4%) take the first terminal.
+# - FINISH "doubling" is not redundancy: 99.2% of finishing instances finish
+#   exactly once, and the recurring tail (0.8%, up to 1,894 finishes) finishes
+#   once *per distinct `sched_seq`*, i.e. genuine separate scheduled runs. They
+#   become legitimate separate negatives. The only safeguards they require are
+#   modeling-stage, not here: a per-instance negative cap and a group-aware
+#   train/test split by instance key (Section 11.5, applied in notebook 11).
+#
+# **Grain change.** The episode key is
+# `(collection_id, instance_index, sched_seq)`. History becomes strictly-prior
+# cumulative counts over an instance's earlier episodes. Static submission
+# attributes (cpu_request, memory_request, priority, scheduling_class) are
+# constant within an instance and broadcast to each episode; the per-episode
+# scheduled machine and schedule time come from the episode's own SCHEDULE
+# event, and the per-episode queue time uses the SUBMIT that initiated that
+# attempt.
+#
+# **Scope of this part (Phase A).** Build the leakage-free episode Tier 1
+# matrix: segmentation, label, strictly-prior history, per-episode scheduling /
+# temporal features, exported for notebook 11 to re-run the prediction-point
+# ablation on. The Tier 2 / Tier 3 usage rewire to episode grain (each episode
+# carries its own +/-60s and 0..60min usage windows, assigned by schedule
+# interval) is Phase B and is documented as the next step in Section 11.6.
+#
+# **Outputs.**
+# - `{PROJECT}.dissertation_lebel.episode_segments_history` (BigQuery, every
+#   `sched_seq >= 1` episode with terminal + strictly-prior history; all
+#   terminal types retained so history counts prior evicts/kills too).
+# - `{PROJECT}.dissertation_lebel.episode_lifecycle_features_base` (BigQuery,
+#   modeling episodes only: label in {0, 1}, Tier 1 episode features).
+# - `{OUTPUT_DIR}/features/google/episode_features_tier1.parquet` (Drive).
+
+# %%
+from src.data.schemas import EVENT_SCHEDULE, EVENT_SUBMIT, EVENT_FINISH, EVENT_KILL
+
+EPISODE_EVENTS_TABLE = 'instance_events_labeled'
+EPISODE_HISTORY_TABLE = 'episode_segments_history'
+EPISODE_BASE_TABLE = 'episode_lifecycle_features_base'
+EPISODE_GCS_PREFIX = f'{GCS_FEATURES_PREFIX}/episode_features_tier1'
+EPISODE_MATRIX_PATH = FEATURES_DIR / 'episode_features_tier1.parquet'
+
+TERMINAL_TYPES_SQL = f"{EVENT_EVICT}, {EVENT_FAIL}, {EVENT_FINISH}, {EVENT_KILL}, {EVENT_LOST}"
+
+# Episode-grain checks live in their own list so the instance-grain
+# verification log (Section 10) is left untouched.
+episode_verification_rows: list[dict] = []
+
+
+def record_episode_check(check: str, expected: object, observed: object, ok: bool, notes: str = "") -> None:
+    """Append an episode-grain verification row and print a one-line summary."""
+    status = "PASS" if ok else "FAIL"
+    episode_verification_rows.append({
+        "check": check, "expected": str(expected), "observed": str(observed),
+        "ok": ok, "notes": notes,
+    })
+    suffix = f" ({notes})" if notes else ""
+    print(f"  [{status}] {check}: expected {expected}, observed {observed}{suffix}")
+
+
+# %% [markdown]
+# ### 11.1 Segment episodes and attach strictly-prior history
+#
+# One BigQuery pass over `instance_events_labeled`:
+# - `ev` tags every event with `sched_seq` (running SCHEDULE count) and a
+#   running last-SUBMIT time, so each SCHEDULE row knows the submit that opened
+#   its attempt.
+# - `seg` collapses to one row per `(instance, sched_seq >= 1)` episode: the
+#   episode's schedule time and scheduled machine (from its SCHEDULE event), the
+#   attempt's submit time, and the first terminal event by time.
+# - `hist` adds strictly-prior cumulative history with a window framed
+#   `UNBOUNDED PRECEDING AND 1 PRECEDING` (the current episode is excluded, which
+#   is exactly what removes the lifecycle peek). History is computed over *all*
+#   episodes, including EVICT/KILL/open, so prior counts are complete; the
+#   modeling filter to FAIL_LOST/FINISH happens later in Section 11.2.
+
+# %%
+build_history_sql = f"""
+CREATE OR REPLACE TABLE {fqn(EPISODE_HISTORY_TABLE)}
+CLUSTER BY collection_id, instance_index AS
+WITH ev AS (
+    SELECT
+        collection_id,
+        instance_index,
+        time,
+        type,
+        machine_id,
+        COUNTIF(type = {EVENT_SCHEDULE}) OVER (
+            PARTITION BY collection_id, instance_index
+            ORDER BY time
+            ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+        ) AS sched_seq,
+        -- Most recent SUBMIT at or before this event; at the SCHEDULE row this
+        -- is the submit that initiated the attempt (per-episode queue anchor).
+        MAX(IF(type = {EVENT_SUBMIT}, time, NULL)) OVER (
+            PARTITION BY collection_id, instance_index
+            ORDER BY time
+            ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+        ) AS running_last_submit
+    FROM {fqn(EPISODE_EVENTS_TABLE)}
+),
+seg AS (
+    SELECT
+        collection_id,
+        instance_index,
+        sched_seq,
+        -- The episode's SCHEDULE event anchors time, machine, and the attempt
+        -- submit. MIN over the (single) SCHEDULE row in the group selects it.
+        MIN(IF(type = {EVENT_SCHEDULE}, time, NULL))               AS schedule_time,
+        MIN(IF(type = {EVENT_SCHEDULE}, machine_id, NULL))         AS scheduled_machine_id,
+        MIN(IF(type = {EVENT_SCHEDULE}, running_last_submit, NULL)) AS attempt_submit_time,
+        -- First terminal event by time within the episode (locked rule).
+        ARRAY_AGG(
+            IF(type IN ({TERMINAL_TYPES_SQL}), type, NULL)
+            IGNORE NULLS ORDER BY time LIMIT 1
+        )[SAFE_OFFSET(0)] AS terminal_type,
+        COUNTIF(type IN ({TERMINAL_TYPES_SQL})) AS n_terminal_events
+    FROM ev
+    WHERE sched_seq >= 1
+    GROUP BY collection_id, instance_index, sched_seq
+)
+SELECT
+    collection_id,
+    instance_index,
+    sched_seq,
+    schedule_time,
+    scheduled_machine_id,
+    attempt_submit_time,
+    terminal_type,
+    n_terminal_events,
+    -- Strictly-prior history: window excludes the current episode.
+    COUNT(*) OVER w                                              AS prior_episode_count,
+    COUNTIF(terminal_type IN ({EVENT_FAIL}, {EVENT_LOST})) OVER w AS prior_fail_count,
+    COUNTIF(terminal_type = {EVENT_FINISH}) OVER w               AS prior_finish_count,
+    COUNTIF(terminal_type = {EVENT_EVICT}) OVER w                AS prior_evict_count
+FROM seg
+WINDOW w AS (
+    PARTITION BY collection_id, instance_index
+    ORDER BY sched_seq
+    ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING
+)
+"""
+run_ddl(build_history_sql, f"Segment episodes + strictly-prior history -> {EPISODE_HISTORY_TABLE}")
+
+n_episodes_all = row_count(EPISODE_HISTORY_TABLE)
+print(f"Total scheduled episodes (sched_seq >= 1): {n_episodes_all:,}")
+
+# Segmentation sanity: terminal composition and the open-episode share.
+seg_audit = run_query(f"""
+SELECT
+    COUNT(*) AS n_episodes,
+    COUNTIF(terminal_type IN ({EVENT_FAIL}, {EVENT_LOST})) AS n_fail_lost,
+    COUNTIF(terminal_type = {EVENT_FINISH})                AS n_finish,
+    COUNTIF(terminal_type = {EVENT_EVICT})                 AS n_evict,
+    COUNTIF(terminal_type = {EVENT_KILL})                  AS n_kill,
+    COUNTIF(terminal_type IS NULL)                         AS n_open,
+    COUNTIF(n_terminal_events > 1)                         AS n_multi_terminal
+FROM {fqn(EPISODE_HISTORY_TABLE)}
+""")
+print(seg_audit)
+_open_frac = seg_audit["n_open"].item() / seg_audit["n_episodes"].item()
+_multi_frac = seg_audit["n_multi_terminal"].item() / seg_audit["n_episodes"].item()
+record_episode_check(
+    "Section 11.1: open-episode share is small (right-censored, dropped)",
+    expected="< 0.05 (11b observed ~0.012)",
+    observed=round(_open_frac, 4),
+    ok=(_open_frac < 0.05),
+)
+record_episode_check(
+    "Section 11.1: multi-terminal share is small (first-terminal rule)",
+    expected="< 0.10 (11b observed ~0.054)",
+    observed=round(_multi_frac, 4),
+    ok=(_multi_frac < 0.10),
+)
+
+# %% [markdown]
+# ### 11.2 Build the modeling base (label + Tier 1 episode features)
+#
+# Filter to terminal in {FAIL, LOST, FINISH} (drops EVICT/KILL via V08/V27 and
+# open episodes via the right-censoring rule), then attach the Tier 1 feature
+# block:
+# - **historical (strictly-prior):** `prior_fail_count`, `prior_evict_count`,
+#   `resubmission_count` (= prior episode count), `has_prior_fail`,
+#   `first_resubmission`. These are now leakage-free by construction.
+# - **scheduling (V07):** static submission attributes from
+#   `instance_lifecycle_summary`, per-episode `queue_time`
+#   (schedule_time - attempt_submit_time), `priority_tier` and `platform`
+#   one-hots. `platform` uses the episode's own scheduled machine.
+# - **temporal (V26):** computed from the episode's schedule time via the same
+#   naive-anchor convention as Section 5 (anchor 2019-05-01, minus the 600s
+#   pre-trace offset). Columns keep the `submit_*` names so notebook 11's
+#   feature lists carry over; they are per-attempt schedule-time features.
+#
+# One-hot column sets reuse the Section 4/5 enumerations
+# (`PRIORITY_TIER_LEVELS`, `platform_ids`, `PLATFORM_SUFFIX`) so the episode
+# matrix is column-compatible with the instance matrix.
+
+# %%
+# Build one-hot and temporal SQL fragments from the enumerations defined in
+# Sections 2/4 so the episode columns line up with the instance columns.
+# Explicit, readable priority-tier band CASE -> one-hot (mirrors _priority_tier_expr).
+_priority_tier_case = f"""
+    CASE
+        WHEN s.terminal_priority <= {PRIORITY_FREE_MAX} THEN 'free'
+        WHEN s.terminal_priority BETWEEN {PRIORITY_BEST_EFFORT_LOW} AND {PRIORITY_BEST_EFFORT_MAX} THEN 'best_effort'
+        WHEN s.terminal_priority BETWEEN {PRIORITY_MID_TIER_LOW} AND {PRIORITY_MID_TIER_MAX} THEN 'mid'
+        WHEN s.terminal_priority BETWEEN {PRIORITY_PRODUCTION_LOW} AND {PRIORITY_PRODUCTION_MAX} THEN 'production'
+        WHEN s.terminal_priority >= {PRIORITY_MONITORING_LOW} THEN 'monitoring'
+        ELSE 'unknown'
+    END
+"""
+_priority_onehot_sql = ",\n    ".join(
+    f"IF(({_priority_tier_case.strip()}) = '{lvl}', 1, 0) AS priority_tier_{lvl}"
+    for lvl in PRIORITY_TIER_LEVELS
+)
+_platform_onehot_sql = ",\n    ".join(
+    f"IF(m.platform_id = '{pid}', 1, 0) AS platform_{PLATFORM_SUFFIX[pid]}"
+    for pid in platform_ids
+)
+
+# Per-episode wall clock from the schedule time (naive-anchor; same convention
+# as Section 5). EXTRACT components match the PDT census used by V26.
+_ep_wall_sql = (
+    f"TIMESTAMP_ADD(TIMESTAMP '2019-05-01 00:00:00', "
+    f"INTERVAL CAST(h.schedule_time - {TRACE_PRE_OFFSET_US} AS INT64) MICROSECOND)"
+)
+
+build_episode_base_sql = f"""
+CREATE OR REPLACE TABLE {fqn(EPISODE_BASE_TABLE)}
+CLUSTER BY collection_id, instance_index AS
+WITH plat AS (
+    SELECT machine_id, ANY_VALUE(platform_id) AS platform_id
+    FROM {fqn('machine_events_full')}
+    WHERE machine_id IS NOT NULL AND platform_id IS NOT NULL
+    GROUP BY machine_id
+),
+base AS (
+    SELECT
+        h.*,
+        {_ep_wall_sql} AS _sched_wall
+    FROM {fqn(EPISODE_HISTORY_TABLE)} h
+    WHERE h.terminal_type IN ({EVENT_FAIL}, {EVENT_LOST}, {EVENT_FINISH})
+)
+SELECT
+    h.collection_id,
+    h.instance_index,
+    h.sched_seq,
+    -- Label (V01): FAIL/LOST -> 1, FINISH -> 0.
+    IF(h.terminal_type IN ({EVENT_FAIL}, {EVENT_LOST}), 1, 0) AS failure_label,
+    IF(h.terminal_type IN ({EVENT_FAIL}, {EVENT_LOST}), 'FAIL_LOST', 'FINISH') AS outcome,
+    -- Tier 1 historical (strictly-prior; leakage-free).
+    h.prior_fail_count,
+    h.prior_evict_count,
+    h.prior_episode_count AS resubmission_count,
+    IF(h.prior_fail_count > 0, 1, 0) AS has_prior_fail,
+    IF(h.prior_episode_count >= 1, 1, 0) AS first_resubmission,
+    -- Tier 1 scheduling (static submission attributes + per-episode queue time).
+    s.cpu_request,
+    s.memory_request,
+    SAFE_DIVIDE(s.cpu_request, NULLIF(s.memory_request, 0)) AS request_ratio,
+    CAST(s.terminal_scheduling_class AS INT64) AS scheduling_class,
+    SAFE_DIVIDE(h.schedule_time - h.attempt_submit_time, {MICROS_PER_SEC}) AS queue_time,
+    COALESCE(hc.has_hardware_counters_majority, 0) AS has_hardware_counters,
+    {_priority_onehot_sql},
+    {_platform_onehot_sql},
+    -- Tier 1 temporal (V26), from the episode's schedule wall clock.
+    EXTRACT(HOUR FROM h._sched_wall) AS submit_hour_of_day,
+    MOD(EXTRACT(DAYOFWEEK FROM h._sched_wall) + 5, 7) AS submit_day_of_week,
+    SIN(2 * ACOS(-1) * EXTRACT(HOUR FROM h._sched_wall) / 24) AS submit_hour_sin,
+    COS(2 * ACOS(-1) * EXTRACT(HOUR FROM h._sched_wall) / 24) AS submit_hour_cos,
+    IF(EXTRACT(HOUR FROM h._sched_wall) BETWEEN 8 AND 17, 1, 0) AS submit_is_business_hours_pdt,
+    IF(MOD(EXTRACT(DAYOFWEEK FROM h._sched_wall) + 5, 7) >= 5, 1, 0) AS submit_is_weekend
+FROM base h
+LEFT JOIN {fqn('instance_lifecycle_summary')} s
+  USING (collection_id, instance_index)
+LEFT JOIN {fqn('instance_hardware_counters_majority')} hc
+  USING (collection_id, instance_index)
+LEFT JOIN plat m
+  ON m.machine_id = h.scheduled_machine_id
+"""
+run_ddl(build_episode_base_sql, f"Build episode Tier 1 base -> {EPISODE_BASE_TABLE}")
+
+# %% [markdown]
+# ### 11.3 Label balance and leakage guardrails
+#
+# Two checks. First, the episode-grain class balance should match 11b
+# (neg:pos ~4.6:1, ~18% positive); a large drift means the segmentation or the
+# terminal rule changed. Second, a direct leakage guard: at the *first* episode
+# of every instance (`resubmission_count = 0`) the strictly-prior history must
+# be all zeros. If any first episode shows prior history, the window frame is
+# wrong and the peek is back.
+
+# %%
+balance = run_query(f"""
+SELECT
+    COUNT(*) AS n,
+    COUNTIF(failure_label = 1) AS n_pos,
+    COUNTIF(failure_label = 0) AS n_neg
+FROM {fqn(EPISODE_BASE_TABLE)}
+""")
+n_ep = int(balance["n"].item())
+n_pos = int(balance["n_pos"].item())
+n_neg = int(balance["n_neg"].item())
+pos_frac = n_pos / n_ep if n_ep else 0.0
+neg_pos_ratio = (n_neg / n_pos) if n_pos else float("inf")
+print(f"Episodes: {n_ep:,} | positive {n_pos:,} ({pos_frac:.3f}) | neg:pos {neg_pos_ratio:.2f}:1")
+record_episode_check(
+    "Section 11.3: episode-grain positive fraction matches 11b",
+    expected="~0.18 (accept 0.10 - 0.30)",
+    observed=round(pos_frac, 3),
+    ok=(0.10 <= pos_frac <= 0.30),
+)
+record_episode_check(
+    "Section 11.3: episode-grain neg:pos ratio matches 11b",
+    expected="~4.6:1 (accept 2:1 - 8:1)",
+    observed=round(neg_pos_ratio, 2),
+    ok=(2.0 <= neg_pos_ratio <= 8.0),
+)
+
+leak_guard = run_query(f"""
+SELECT
+    COUNTIF(resubmission_count = 0
+            AND (prior_fail_count > 0 OR prior_evict_count > 0
+                 OR has_prior_fail = 1 OR first_resubmission = 1)) AS n_first_with_history
+FROM {fqn(EPISODE_BASE_TABLE)}
+""")
+n_first_leak = int(leak_guard["n_first_with_history"].item())
+record_episode_check(
+    "Section 11.3: first episodes carry zero prior history (strictly-prior guard)",
+    expected=0,
+    observed=n_first_leak,
+    ok=(n_first_leak == 0),
+    notes="Any nonzero means the strictly-prior window frame leaked the current episode.",
+)
+
+# %% [markdown]
+# ### 11.4 Export the episode Tier 1 matrix
+#
+# Export to GCS, then a pure streaming copy to the single Drive Parquet that
+# notebook 11 will scan. No joins or aggregations in the copy, so memory is
+# bounded regardless of episode count.
+
+# %%
+episode_uri = f"gs://{GCS_BUCKET}/{EPISODE_GCS_PREFIX}/"
+export_episode_sql = f"""
+EXPORT DATA OPTIONS(
+    uri='{episode_uri}*.parquet',
+    format='PARQUET',
+    compression='SNAPPY',
+    overwrite=true
+) AS
+SELECT * FROM {fqn(EPISODE_BASE_TABLE)}
+"""
+run_ddl(export_episode_sql, f"Export episode Tier 1 matrix -> {episode_uri}")
+
+EPISODE_MATRIX_PATH.parent.mkdir(parents=True, exist_ok=True)
+pl.scan_parquet(episode_uri).sink_parquet(str(EPISODE_MATRIX_PATH), compression="snappy")
+print(f"Episode Tier 1 matrix written: {EPISODE_MATRIX_PATH}")
+
+episode_verification_df = pl.DataFrame(episode_verification_rows)
+EPISODE_VERIFICATION_CSV = TABLES_DIR / "google_episode_reconstruction_verification.csv"
+episode_verification_df.write_csv(str(EPISODE_VERIFICATION_CSV))
+print(f"Episode verification log: {EPISODE_VERIFICATION_CSV}")
+print(episode_verification_df.select(["check", "ok"]))
+
+n_episode_failed = episode_verification_df.filter(~pl.col("ok")).height
+assert n_episode_failed == 0, "Resolve failed episode-grain assertions before modeling."
+
+# %% [markdown]
+# ### 11.5 Modeling-stage helpers: per-instance negative cap + group split
+#
+# These do NOT change the base table (per the decision to keep the full episode
+# record for auditing). They are applied in notebook 11 when assembling the
+# training frame:
+#
+# - **Per-instance negative cap.** The recurring tail (~1,419 instances, up to
+#   1,894 finishes each) would otherwise flood the negative class with highly
+#   correlated episodes from a handful of instances. Cap the number of negative
+#   (FINISH) episodes kept per instance at `CAP_NEG_PER_INSTANCE` (default 5),
+#   sampled deterministically. Positives are never capped.
+# - **Group-aware split.** Split train/test by instance key, never by episode,
+#   so no instance's episodes straddle the split (which would let a recurring
+#   instance's near-identical episodes leak across the boundary).
+#
+# Both are pure-Polars and deterministic (seed P14 = 42).
+
+# %%
+CAP_NEG_PER_INSTANCE = 5
+SEED_P14 = 42
+
+
+def cap_negative_episodes(lf: pl.LazyFrame, cap: int = CAP_NEG_PER_INSTANCE,
+                          seed: int = SEED_P14) -> pl.LazyFrame:
+    """Keep all positive episodes; keep at most `cap` negative episodes per
+    instance, chosen by a deterministic per-instance hash ordering. Controls the
+    recurring-instance negative flood without touching the base table.
+    """
+    ranked = lf.with_columns(
+        # Deterministic per-episode order within an instance via a hashed key.
+        (pl.col("collection_id").cast(pl.Utf8) + "_"
+         + pl.col("instance_index").cast(pl.Utf8) + "_"
+         + pl.col("sched_seq").cast(pl.Utf8) + f"_{seed}").hash().alias("_ep_hash"),
+    ).with_columns(
+        pl.col("_ep_hash").rank("ordinal").over(["collection_id", "instance_index"]).alias("_neg_rank"),
+    )
+    keep = (pl.col("failure_label") == 1) | (pl.col("_neg_rank") <= cap)
+    return ranked.filter(keep).drop(["_ep_hash", "_neg_rank"])
+
+
+def group_train_test_split(lf: pl.LazyFrame, test_frac: float = 0.2,
+                           seed: int = SEED_P14) -> tuple[pl.LazyFrame, pl.LazyFrame]:
+    """Split episodes into train/test by INSTANCE key (group-aware), so an
+    instance's episodes never straddle the split. Deterministic via a hash of
+    the instance key into [0, 1).
+    """
+    keyed = lf.with_columns(
+        ((pl.col("collection_id").cast(pl.Utf8) + "_"
+          + pl.col("instance_index").cast(pl.Utf8) + f"_{seed}").hash() % 1_000_000 / 1_000_000)
+        .alias("_grp_u")
+    )
+    train = keyed.filter(pl.col("_grp_u") >= test_frac).drop("_grp_u")
+    test = keyed.filter(pl.col("_grp_u") < test_frac).drop("_grp_u")
+    return train, test
+
+
+# Quick demonstration on the written matrix (bounded slice for the probe).
+_episode_lf = pl.scan_parquet(str(EPISODE_MATRIX_PATH))
+_capped_pos = _episode_lf.pipe(cap_negative_episodes).filter(pl.col("failure_label") == 1).select(pl.len()).collect().item()
+_capped_neg = _episode_lf.pipe(cap_negative_episodes).filter(pl.col("failure_label") == 0).select(pl.len()).collect().item()
+print(f"After per-instance negative cap ({CAP_NEG_PER_INSTANCE}): "
+      f"pos={_capped_pos:,} neg={_capped_neg:,} neg:pos={_capped_neg / max(_capped_pos, 1):.2f}:1")
+
+# %% [markdown]
+# ### 11.6 Next step (Phase B): Tier 2 / Tier 3 at episode grain
+#
+# Phase A delivers the leakage-free Tier 1 episode matrix. To bring the runtime
+# and windowed-utilization tiers to the episode grain, rewire Sections 7-8 so
+# the usage joins key on the episode:
+# - Replace the single per-instance `schedule_time` with the per-episode
+#   `schedule_time` from `episode_segments_history`, and assign each usage
+#   observation to the episode whose `[schedule_time, next_schedule_time)`
+#   interval contains it (a join on instance key plus an interval predicate, or
+#   an `ASOF`-style match), before applying the +/-60s (Tier 2) and 0..60min
+#   (Tier 3) windows.
+# - Aggregate slopes/ramps/windows per `(collection_id, instance_index,
+#   sched_seq)` instead of per instance, then left-join onto
+#   `episode_lifecycle_features_base`.
+# Then re-run notebook 11's prediction-point ablation on the full episode
+# matrix; the at-submission + strictly-prior-history MCC should fall from the
+# leaked ~0.93 to a defensible level, confirming the redesign.
+
+# %% [markdown]
+# ---
+# ## 12. Episode-grain Tier 2 / Tier 3 (Phase B) + full episode matrix
+#
+# Phase A (Section 11) delivered the leakage-free episode Tier 1 matrix.
+# Notebook 11 Section 3.8 confirmed the fix: at the episode grain the
+# submission+history MCC drops by ~0.27 from the leaked instance-grain value,
+# and strictly-prior history adds almost nothing once it cannot see the label.
+# Phase B brings the runtime (Tier 2) and windowed-utilization (Tier 3) tiers to
+# the episode grain so the at-scheduling and early-runtime prediction points
+# (where the RQ1 >0.90 target is actually tested) can be evaluated.
+#
+# **Usage-to-episode assignment.** The instance-grain Sections 7-8 used a single
+# per-instance `schedule_time` and a symmetric +/-60s band. At the episode grain
+# a recurring instance has many schedules, and a naive band would let one usage
+# observation fall into two episodes' windows (cross-episode contamination). The
+# fix is interval assignment: each usage observation belongs to exactly the
+# episode whose half-open schedule interval `[schedule_time, next_schedule_time)`
+# contains it. Tier 2 keeps the first 60s of that interval; Tier 3 keeps up to
+# 60min, clipped at the next schedule. For rapidly-resubmitting tasks the Tier 3
+# window is therefore legitimately short (the next run's usage is never
+# attributed to this episode), which is the honest behavior.
+#
+# Everything reuses the validated slope (`_slope_sql`) and windowed-aggregate
+# (`_windowed_agg_sql`) builders from Sections 7-8; only the grain changes
+# (partition / group / join keys gain `sched_seq`).
+#
+# **Outputs.**
+# - `{PROJECT}.dissertation_lebel.episode_schedule_intervals`
+# - `{PROJECT}.dissertation_lebel.episode_usage_working_set` (Tier 2 subset)
+# - `{PROJECT}.dissertation_lebel.episode_usage_working_set_t3` (Tier 3 subset)
+# - `{PROJECT}.dissertation_lebel.episode_runtime_features` (Tier 2 per episode)
+# - `{PROJECT}.dissertation_lebel.episode_tier3_features` (Tier 3 per episode)
+# - `{PROJECT}.dissertation_lebel.episode_features` (full episode matrix)
+# - `{OUTPUT_DIR}/features/google/episode_features.parquet` (Drive)
+
+# %%
+EPISODE_INTERVALS_TABLE = 'episode_schedule_intervals'
+EPISODE_USAGE_T2_TABLE = 'episode_usage_working_set'
+EPISODE_USAGE_T3_TABLE = 'episode_usage_working_set_t3'
+EPISODE_RUNTIME_TABLE = 'episode_runtime_features'
+EPISODE_TIER3_TABLE = 'episode_tier3_features'
+EPISODE_FEATURES_TABLE = 'episode_features'
+EPISODE_FULL_GCS_PREFIX = f'{GCS_FEATURES_PREFIX}/episode_features'
+
+# %% [markdown]
+# ### 12.1 Per-episode schedule intervals
+#
+# `next_schedule_time` is the same instance's next episode schedule (NULL on the
+# last episode -> open-ended). Built from `episode_segments_history` so every
+# scheduled run (including EVICT/KILL/open) bounds the interval, which is correct
+# for assigning usage to the run that was actually executing.
+
+# %%
+build_intervals_sql = f"""
+CREATE OR REPLACE TABLE {fqn(EPISODE_INTERVALS_TABLE)}
+CLUSTER BY collection_id, instance_index AS
+SELECT
+    collection_id,
+    instance_index,
+    sched_seq,
+    schedule_time,
+    LEAD(schedule_time) OVER (
+        PARTITION BY collection_id, instance_index ORDER BY sched_seq
+    ) AS next_schedule_time
+FROM {fqn(EPISODE_HISTORY_TABLE)}
+"""
+run_ddl(build_intervals_sql, f"Build episode schedule intervals -> {EPISODE_INTERVALS_TABLE}")
+
+# %% [markdown]
+# ### 12.2 Tier 2 episode usage subset + slope/ramp features
+#
+# Stage 1 assigns each usage observation to its containing episode interval and
+# keeps the first 60s post-schedule. Stage 2 reuses `_slope_sql` with the grain
+# extended to `(collection_id, instance_index, sched_seq)`.
+
+# %%
+ep_stage1_t2_sql = f"""
+CREATE OR REPLACE TABLE {fqn(EPISODE_USAGE_T2_TABLE)}
+CLUSTER BY collection_id, instance_index AS
+SELECT
+    u.*,
+    e.sched_seq,
+    e.schedule_time,
+    SAFE_DIVIDE(u.start_time - e.schedule_time, {MICROS_PER_SEC}) AS sec_since_schedule
+FROM {fqn('instance_usage_with_indicators')} u
+INNER JOIN {fqn(EPISODE_INTERVALS_TABLE)} e
+  USING (collection_id, instance_index)
+WHERE u.start_time >= e.schedule_time
+  AND (e.next_schedule_time IS NULL OR u.start_time < e.next_schedule_time)
+  AND u.start_time <= e.schedule_time + {EARLY_RUNTIME_BAND_US}
+"""
+run_ddl(ep_stage1_t2_sql, f"Stage 1 (episode Tier 2) -> {EPISODE_USAGE_T2_TABLE}")
+
+ep_stage2_t2_sql = f"""
+CREATE OR REPLACE TABLE {fqn(EPISODE_RUNTIME_TABLE)}
+CLUSTER BY collection_id, instance_index AS
+WITH ranked AS (
+    SELECT
+        collection_id, instance_index, sched_seq,
+        sec_since_schedule, avg_cpu, avg_memory,
+        cycles_per_instruction, memory_accesses_per_instruction,
+        has_cpi_value, has_mapi_value,
+        ROW_NUMBER() OVER (
+            PARTITION BY collection_id, instance_index, sched_seq
+            ORDER BY sec_since_schedule
+        ) AS rn_post,
+        LAG(avg_cpu) OVER (
+            PARTITION BY collection_id, instance_index, sched_seq
+            ORDER BY sec_since_schedule
+        ) AS prev_avg_cpu,
+        LAG(avg_memory) OVER (
+            PARTITION BY collection_id, instance_index, sched_seq
+            ORDER BY sec_since_schedule
+        ) AS prev_avg_memory,
+        AVG(avg_cpu) OVER (
+            PARTITION BY collection_id, instance_index, sched_seq
+            ORDER BY sec_since_schedule
+            ROWS BETWEEN CURRENT ROW AND 2 FOLLOWING
+        ) AS first_window_avg_cpu
+    FROM {fqn(EPISODE_USAGE_T2_TABLE)}
+    WHERE sec_since_schedule >= 0
+),
+agg AS (
+    SELECT
+        collection_id, instance_index, sched_seq,
+        {_slope_sql('avg_cpu', 5)}  AS cpu_slope_5s,
+        {_slope_sql('avg_cpu', 15)} AS cpu_slope_15s,
+        {_slope_sql('avg_cpu', 30)} AS cpu_slope_30s,
+        {_slope_sql('avg_memory', 5)}  AS memory_slope_5s,
+        {_slope_sql('avg_memory', 15)} AS memory_slope_15s,
+        {_slope_sql('avg_memory', 30)} AS memory_slope_30s,
+        MAX(IF(rn_post = 2, avg_cpu - prev_avg_cpu, NULL))       AS initial_cpu_ramp,
+        MAX(IF(rn_post = 2, avg_memory - prev_avg_memory, NULL)) AS initial_memory_ramp,
+        MAX(IF(rn_post = 1, first_window_avg_cpu, NULL))         AS first_interval_avg_cpu,
+        MAX(IF(rn_post = 1, cycles_per_instruction, NULL))          AS first_cpi,
+        MAX(IF(rn_post = 1, memory_accesses_per_instruction, NULL)) AS first_mapi,
+        MAX(IF(rn_post = 1, has_cpi_value, NULL))                AS first_has_cpi,
+        MAX(IF(rn_post = 1, has_mapi_value, NULL))               AS first_has_mapi
+    FROM ranked
+    GROUP BY collection_id, instance_index, sched_seq
+)
+SELECT
+    a.collection_id, a.instance_index, a.sched_seq,
+    a.cpu_slope_5s, a.cpu_slope_15s, a.cpu_slope_30s,
+    a.memory_slope_5s, a.memory_slope_15s, a.memory_slope_30s,
+    a.initial_cpu_ramp, a.initial_memory_ramp,
+    SAFE_DIVIDE(a.first_interval_avg_cpu, NULLIF(s.cpu_request, 0)) AS first_interval_util_ratio,
+    IF(a.first_has_cpi  = 1, a.first_cpi,  NULL) AS cpi_value,
+    IF(a.first_has_mapi = 1, a.first_mapi, NULL) AS mapi_value
+FROM agg a
+LEFT JOIN {fqn('instance_lifecycle_summary')} s
+  USING (collection_id, instance_index)
+"""
+run_ddl(ep_stage2_t2_sql, f"Stage 2 (episode Tier 2) -> {EPISODE_RUNTIME_TABLE}")
+
+# %% [markdown]
+# ### 12.3 Tier 3 episode usage subset + windowed aggregates
+#
+# Same interval assignment, horizon 60min, clipped at the next schedule. Reuses
+# `_windowed_agg_sql` with the grain extended to include `sched_seq`.
+
+# %%
+ep_stage1_t3_sql = f"""
+CREATE OR REPLACE TABLE {fqn(EPISODE_USAGE_T3_TABLE)}
+CLUSTER BY collection_id, instance_index AS
+SELECT
+    u.collection_id,
+    u.instance_index,
+    e.sched_seq,
+    u.avg_cpu,
+    u.avg_memory,
+    SAFE_DIVIDE(u.start_time - e.schedule_time, {MICROS_PER_SEC}) AS sec_since_schedule
+FROM {fqn('instance_usage_with_indicators')} u
+INNER JOIN {fqn(EPISODE_INTERVALS_TABLE)} e
+  USING (collection_id, instance_index)
+WHERE u.start_time >= e.schedule_time
+  AND (e.next_schedule_time IS NULL OR u.start_time < e.next_schedule_time)
+  AND u.start_time <= e.schedule_time + {TIER3_MAX_WINDOW_US}
+"""
+run_ddl(ep_stage1_t3_sql, f"Stage 1 (episode Tier 3) -> {EPISODE_USAGE_T3_TABLE}")
+
+ep_tier3_agg_sql = f"""
+CREATE OR REPLACE TABLE {fqn(EPISODE_TIER3_TABLE)}
+CLUSTER BY collection_id, instance_index AS
+SELECT
+    collection_id,
+    instance_index,
+    sched_seq,
+    {_windowed_agg_sql()}
+FROM {fqn(EPISODE_USAGE_T3_TABLE)}
+GROUP BY collection_id, instance_index, sched_seq
+"""
+run_ddl(ep_tier3_agg_sql, f"Episode Tier 3 windowed aggregates -> {EPISODE_TIER3_TABLE}")
+
+# %% [markdown]
+# ### 12.4 Assemble the full episode matrix and export
+#
+# Left-join Tier 2 / Tier 3 onto the episode Tier 1 base on the episode key.
+# Episodes with no in-band usage (rapid-onset crashes) carry null Tier 2/3,
+# exactly as at the instance grain.
+
+# %%
+ep_tier2_select = ",\n    ".join(f"t2.{c}" for c in TIER2_FEATURE_COLS)
+ep_tier3_select = ",\n    ".join(f"t3.{c}" for c in TIER3_FEATURE_COLS)
+
+assemble_episode_sql = f"""
+CREATE OR REPLACE TABLE {fqn(EPISODE_FEATURES_TABLE)}
+CLUSTER BY collection_id, instance_index AS
+SELECT
+    t1.*,
+    {ep_tier2_select},
+    {ep_tier3_select}
+FROM {fqn(EPISODE_BASE_TABLE)} t1
+LEFT JOIN {fqn(EPISODE_RUNTIME_TABLE)} t2
+  USING (collection_id, instance_index, sched_seq)
+LEFT JOIN {fqn(EPISODE_TIER3_TABLE)} t3
+  USING (collection_id, instance_index, sched_seq)
+"""
+run_ddl(assemble_episode_sql, f"Assemble full episode matrix -> {EPISODE_FEATURES_TABLE}")
+
+n_episode_full = row_count(EPISODE_FEATURES_TABLE)
+n_episode_base = row_count(EPISODE_BASE_TABLE)
+print(f"Full episode matrix rows: {n_episode_full:,}")
+record_episode_check(
+    "Section 12.4: full episode matrix row count matches the episode base",
+    expected=n_episode_base,
+    observed=n_episode_full,
+    ok=(n_episode_full == n_episode_base),
+    notes="Tier 1 backbone with Tier 2/3 left joins; one row per modeling episode.",
+)
+
+# Tier 2 / Tier 3 availability (non-null fraction of a representative column).
+ep_avail = run_query(f"""
+SELECT
+    COUNT(*) AS n,
+    COUNTIF(cpu_slope_15s IS NOT NULL) AS n_t2,
+    COUNTIF(avg_cpu_5min IS NOT NULL)  AS n_t3
+FROM {fqn(EPISODE_FEATURES_TABLE)}
+""")
+_t2_avail = ep_avail["n_t2"].item() / ep_avail["n"].item()
+_t3_avail = ep_avail["n_t3"].item() / ep_avail["n"].item()
+print(f"Episode Tier 2 availability (cpu_slope_15s non-null): {_t2_avail:.3f}")
+print(f"Episode Tier 3 availability (avg_cpu_5min non-null):  {_t3_avail:.3f}")
+record_episode_check(
+    "Section 12.4: Tier 2/3 are populated for a non-trivial share of episodes",
+    expected="> 0 (rapid-onset crashes legitimately lack usage)",
+    observed=f"t2={_t2_avail:.3f}, t3={_t3_avail:.3f}",
+    ok=(_t2_avail > 0 and _t3_avail > 0),
+)
+
+ep_full_uri = f"gs://{GCS_BUCKET}/{EPISODE_FULL_GCS_PREFIX}/"
+export_episode_full_sql = f"""
+EXPORT DATA OPTIONS(
+    uri='{ep_full_uri}*.parquet',
+    format='PARQUET',
+    compression='SNAPPY',
+    overwrite=true
+) AS
+SELECT * FROM {fqn(EPISODE_FEATURES_TABLE)}
+"""
+run_ddl(export_episode_full_sql, f"Export full episode matrix -> {ep_full_uri}")
+
+# The full episode matrix is ~90M rows. Its durable copies are the BigQuery
+# table and the GCS export above; notebook 11 Section 3.8 reads the BigQuery
+# table directly, so no multi-GB Drive sink is written here (large Drive-FUSE
+# writes routinely fail to flush before a Colab runtime recycles). Scan the GCS
+# export with ``pl.scan_parquet(ep_full_uri)`` if a local copy is ever needed.
+print(f"Full episode matrix is durable in BigQuery ({fqn(EPISODE_FEATURES_TABLE)}) "
+      f"and GCS ({ep_full_uri}).")
+
+# Re-write the episode verification log with the Phase B checks appended.
+episode_verification_df = pl.DataFrame(episode_verification_rows)
+episode_verification_df.write_csv(str(EPISODE_VERIFICATION_CSV))
+print(f"Episode verification log (Phase A + B): {EPISODE_VERIFICATION_CSV}")
+print(episode_verification_df.select(["check", "ok"]))
+assert episode_verification_df.filter(~pl.col("ok")).height == 0, \
+    "Resolve failed episode-grain assertions before modeling."
+
+# %% [markdown]
+# **Next steps.** Notebook 11 Section 3.8 reads the durable BigQuery
+# `episode_features` table for the full prediction-point ablation (all five
+# points, now including at-scheduling and early-runtime) and the honest RQ1
+# curve; the at-submission floor is ~0.67
+# MCC and the runtime tiers are where the >0.90 target is tested. Extract each
+# tier section into the matching `src/features/*.py` module as pure
+# LazyFrame -> LazyFrame functions; build `src/features/sampling.py` to produce
+# the locked `working_set_instance_ids`; run the learning-curve harness and the
+# formal Tier 3 inversion guard on this matrix (notebook 11).

@@ -870,6 +870,236 @@ record_check(
 )
 
 # %% [markdown]
+# ### 3.8 Episode-grain leakage re-check (per-attempt redesign)
+#
+# Sections 3.6-3.7 localized the saturation to the lifecycle history reaching
+# past the submission prediction point: at the instance grain,
+# `submission_plus_history` scored an inflated MCC because `prior_fail_count` /
+# `resubmission_count` are computed over the whole lifecycle, including the
+# resubmissions that produce the terminal label. Notebook 10 Section 11 rebuilds
+# the matrix at the **scheduled-episode** grain, where history is strictly prior
+# (leakage guard PASS). With Phase B (notebook 10 Section 12) the full episode
+# matrix `episode_features` carries Tier 2/3 too, so this section runs the whole
+# prediction-point ablation at episode grain: submission, submission+history,
+# at-scheduling, early-runtime, and all-reference. The leakage check compares
+# `submission_plus_history` against the instance-grain value from 3.7
+# (`pp_mcc["submission_plus_history"]`); the early-runtime point is the honest
+# RQ1 baseline (where the >0.90 target is tested).
+#
+# Memory note: the episode base has ~90M rows. The per-instance negative cap,
+# the group-aware (instance-keyed) train/test split, and the subsample are pushed
+# into BigQuery so only a few-million-row extract reaches the Colab box. The cap
+# and split mirror the helpers in notebook 10 Section 11.5. The validation side
+# is left uncapped so MCC is read on the natural episode distribution.
+
+# %%
+from google.colab import auth
+
+from utils.bq_client import get_client, table_ref
+
+auth.authenticate_user()  # idempotent; ensures ADC for the BigQuery extract.
+_bq = get_client()
+# Full episode matrix (Tier 1 + 2 + 3) from notebook 10 Section 12 (Phase B).
+# Run Section 12 first. If only Phase A has run, set this to
+# 'episode_lifecycle_features_base' to score the submission points alone (the
+# at-scheduling / early-runtime points then resolve to the submission set).
+EPISODE_MATRIX_TABLE = 'episode_features'
+EP_CAP_NEG = 5            # per-instance negative cap (notebook 10 Section 11.5 default)
+EP_TRAIN_PERMILLE = 40    # ~4% subsample of the capped train side
+EP_VAL_PERMILLE = 60      # ~6% subsample of the uncapped val side
+EP_TEST_GRP = 0           # instance-key hash bucket (of 5) held out as validation
+
+
+def _episode_extract_sql(*, train: bool) -> str:
+    """Build the BigQuery extract for the episode leakage re-check.
+
+    Group split: instances are bucketed 0..4 by a hash of the instance key;
+    bucket `EP_TEST_GRP` is the validation side, so no instance straddles the
+    split. Cap: train negatives are limited to `EP_CAP_NEG` per instance
+    (positives never capped); validation is uncapped. Subsample: a hash bucket
+    of the episode key thins each side to a few million rows.
+    """
+    key = "CONCAT(CAST(collection_id AS STRING),'_',CAST(instance_index AS STRING))"
+    epkey = ("CONCAT(CAST(collection_id AS STRING),'_',CAST(instance_index AS STRING),"
+             "'_',CAST(sched_seq AS STRING))")
+    grp_pred = f"_grp != {EP_TEST_GRP}" if train else f"_grp = {EP_TEST_GRP}"
+    permille = EP_TRAIN_PERMILLE if train else EP_VAL_PERMILLE
+    cap_clause = (
+        f"WHERE failure_label = 1 OR _rn <= {EP_CAP_NEG}" if train else ""
+    )
+    # Leading comma so the val side (no _rn) leaves a clean ``SELECT *``.
+    rn_col = (
+        ", ROW_NUMBER() OVER (PARTITION BY collection_id, instance_index, failure_label "
+        "ORDER BY _ephash) AS _rn"
+    ) if train else ""
+    return f"""
+WITH split AS (
+    SELECT
+        b.*,
+        MOD(ABS(FARM_FINGERPRINT({key})), 5) AS _grp,
+        ABS(FARM_FINGERPRINT({epkey})) AS _ephash
+    FROM {table_ref(EPISODE_MATRIX_TABLE)} b
+),
+sided AS (
+    SELECT *{rn_col}
+    FROM split
+    WHERE {grp_pred}
+),
+capped AS (
+    SELECT * FROM sided
+    {cap_clause}
+)
+SELECT * FROM capped
+WHERE MOD(_ephash, 1000) < {permille}
+"""
+
+
+print("Pulling episode train/val extracts from BigQuery (capped + group-split + subsampled) ...")
+ep_train_pd = _bq.query(_episode_extract_sql(train=True)).to_dataframe()
+ep_val_pd = _bq.query(_episode_extract_sql(train=False)).to_dataframe()
+ep_train = pl.from_pandas(ep_train_pd)
+ep_val = pl.from_pandas(ep_val_pd)
+del ep_train_pd, ep_val_pd
+gc.collect()
+print(f"Episode train extract: {ep_train.height:,} rows "
+      f"({int(ep_train.filter(pl.col('failure_label') == 1).height):,} positive)")
+print(f"Episode val extract:   {ep_val.height:,} rows "
+      f"({int(ep_val.filter(pl.col('failure_label') == 1).height):,} positive)")
+
+# %%
+# Episode feature groups, derived by name from the extract (robust to one-hot
+# suffixes). lifecycle_position is instance-grain only and absent here by design.
+_ep_cols = set(ep_train.columns)
+EP_SUBMIT_TEMPORAL = sorted(c for c in _ep_cols if c.startswith("submit_"))
+EP_PRIORITY_ONEHOT = sorted(c for c in _ep_cols if c.startswith("priority_tier_"))
+EP_REQUEST = [c for c in ("cpu_request", "memory_request", "request_ratio") if c in _ep_cols]
+EP_HISTORY = [c for c in ("prior_fail_count", "has_prior_fail", "resubmission_count",
+                          "prior_evict_count", "first_resubmission") if c in _ep_cols]
+
+EP_PLATFORM_ONEHOT = sorted(c for c in _ep_cols if c.startswith("platform_"))
+EP_TIER2 = [c for c in (
+    "cpu_slope_5s", "cpu_slope_15s", "cpu_slope_30s",
+    "memory_slope_5s", "memory_slope_15s", "memory_slope_30s",
+    "initial_cpu_ramp", "initial_memory_ramp", "first_interval_util_ratio",
+    "cpi_value", "mapi_value",
+) if c in _ep_cols]
+
+ep_submission_cols = (
+    EP_REQUEST
+    + EP_PRIORITY_ONEHOT
+    + (["scheduling_class"] if "scheduling_class" in _ep_cols else [])
+    + EP_SUBMIT_TEMPORAL
+)
+ep_submission_plus_history_cols = ep_submission_cols + EP_HISTORY
+# At-scheduling adds queue time and the episode's assigned-machine platform.
+ep_at_scheduling_cols = (
+    ep_submission_cols
+    + (["queue_time"] if "queue_time" in _ep_cols else [])
+    + EP_PLATFORM_ONEHOT
+)
+# Early-runtime adds the Tier 2 slopes/ramps and the counter-availability flag.
+# This is the RQ1-relevant point: where the >0.90 MCC target is tested.
+ep_early_runtime_cols = (
+    ep_at_scheduling_cols
+    + EP_TIER2
+    + (["has_hardware_counters"] if "has_hardware_counters" in _ep_cols else [])
+)
+# All-feature reference (every numeric feature present, including Tier 3).
+_ep_nonfeature = {"collection_id", "instance_index", "sched_seq", LABEL_COL,
+                  "outcome", "_grp", "_ephash", "_rn"}
+ep_all_reference_cols = [c for c in ep_train.columns if c not in _ep_nonfeature]
+
+
+def _ep_fit_eval(cols: list[str]) -> tuple[float, np.ndarray, np.ndarray]:
+    """Train the baseline LightGBM on the episode extract; return
+    (validation MCC, val labels, val predicted labels)."""
+    Xtr = ep_train.select([pl.col(c).cast(pl.Float32) for c in cols]).to_numpy()
+    ytr = ep_train.select(LABEL_COL).to_numpy().ravel().astype(np.int8)
+    Xv = ep_val.select([pl.col(c).cast(pl.Float32) for c in cols]).to_numpy()
+    yv = ep_val.select(LABEL_COL).to_numpy().ravel().astype(np.int8)
+    dtrain = lgb.Dataset(Xtr, label=ytr, free_raw_data=True)
+    bst = lgb.train(LGBM_PARAMS, dtrain, num_boost_round=LGBM_NUM_ROUNDS)
+    pred = (bst.predict(Xv) >= 0.5).astype(np.int8)
+    mcc = float(matthews_corrcoef(yv, pred))
+    del Xtr, ytr, dtrain, bst
+    gc.collect()
+    return mcc, yv, pred
+
+
+def _ep_bootstrap_ci(y_true: np.ndarray, y_pred: np.ndarray, n_boot: int = 1000) -> tuple[float, float]:
+    """Percentile 95% CI for MCC over resamples of the (paired) val arrays."""
+    local = np.random.default_rng(SEED)
+    n = y_true.size
+    boots = np.empty(n_boot, dtype=np.float64)
+    for b in range(n_boot):
+        idx = local.integers(0, n, size=n)
+        boots[b] = mcc_of(y_true[idx], y_pred[idx])
+    return float(np.percentile(boots, 2.5)), float(np.percentile(boots, 97.5))
+
+
+ep_points = {
+    "episode_submission_conservative": ep_submission_cols,
+    "episode_submission_plus_history": ep_submission_plus_history_cols,
+    "episode_at_scheduling": ep_at_scheduling_cols,
+    "episode_early_runtime": ep_early_runtime_cols,
+    "episode_all_reference": ep_all_reference_cols,
+}
+ep_rows = []
+print(f"Episode prediction-point re-check "
+      f"(train {ep_train.height:,} rows, eval {ep_val.height:,} rows):")
+for name, cols in ep_points.items():
+    mcc_ep, yv, pred = _ep_fit_eval(cols)
+    lo, hi = _ep_bootstrap_ci(yv, pred)
+    ep_rows.append({"prediction_point": name, "n_features": len(cols),
+                    "val_mcc": mcc_ep, "ci_low": lo, "ci_high": hi})
+    print(f"  {name:32s} n_feat={len(cols):3d}  MCC={mcc_ep:.4f}  95% CI [{lo:.4f}, {hi:.4f}]")
+
+ep_pp_df = pl.DataFrame(ep_rows)
+ep_pp_df.write_csv(str(TABLES_DIR / "google_episode_prediction_point_recheck.csv"))
+ep_mcc = {r["prediction_point"]: r["val_mcc"] for r in ep_rows}
+
+# %%
+# Compare the episode submission+history MCC to the instance-grain value from
+# Section 3.7. The redesign succeeds when the episode value drops materially
+# (the leaked lifecycle history no longer reaches past submission).
+instance_sub_hist = pp_mcc.get("submission_plus_history")
+episode_sub_hist = ep_mcc["episode_submission_plus_history"]
+episode_sub_only = ep_mcc["episode_submission_conservative"]
+drop_vs_instance = (instance_sub_hist - episode_sub_hist) if instance_sub_hist is not None else float("nan")
+print(f"\nsubmission_plus_history MCC  instance-grain (3.7): {instance_sub_hist}")
+print(f"                             episode-grain  (3.8): {episode_sub_hist:.4f}")
+print(f"Drop from regrain: {drop_vs_instance:+.4f}")
+print(f"Episode submission-only MCC: {episode_sub_only:.4f} "
+      f"(strictly-prior history adds {episode_sub_hist - episode_sub_only:+.4f})")
+
+# Runtime prediction points: the RQ1 >0.90 target is tested at early-runtime,
+# not at submission. Present when the full episode matrix (Phase B) was used.
+if "episode_at_scheduling" in ep_mcc:
+    print(f"\nEpisode at_scheduling MCC:  {ep_mcc['episode_at_scheduling']:.4f}")
+    print(f"Episode early_runtime MCC:  {ep_mcc['episode_early_runtime']:.4f}  (RQ1 target > 0.90)")
+    print(f"Episode all_reference MCC:  {ep_mcc['episode_all_reference']:.4f}")
+    record_check(
+        "Section 3.8: early-runtime RQ1 point reported on the episode matrix",
+        expected="reported (>0.90 is the RQ1 target; Tier 2/3 missingness is label-correlated)",
+        observed=f"early_runtime={ep_mcc['episode_early_runtime']:.4f}, "
+                 f"at_scheduling={ep_mcc['episode_at_scheduling']:.4f}",
+        ok=True,
+        notes="Honest episode-grain runtime baseline; interpret alongside Tier 2/3 null fractions.",
+    )
+
+record_check(
+    "Section 3.8: episode-grain regrain removes the history leakage",
+    expected=f"episode submission_plus_history << instance-grain "
+             f"({instance_sub_hist if instance_sub_hist is not None else 'n/a'}); drop >= 0.10",
+    observed=f"episode={episode_sub_hist:.4f}, instance={instance_sub_hist}, drop={drop_vs_instance:+.4f}",
+    ok=(instance_sub_hist is not None and (instance_sub_hist - episode_sub_hist) >= 0.10),
+    notes="Strictly-prior history at episode grain no longer encodes the terminal label.",
+)
+
+del ep_train, ep_val
+gc.collect()
+
+# %% [markdown]
 # ---
 # ## 4. P05 working-set adequacy decision
 #
