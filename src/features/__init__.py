@@ -53,6 +53,11 @@ from src.features.runtime import (
     build_runtime_features_sql,
     build_usage_working_set_sql,
 )
+from src.features.sampling import (
+    SamplingManifest,
+    build_working_set_google,
+    build_working_set_sql,
+)
 from src.features.scheduling import (
     add_hardware_counter_flag,
     add_scheduling_features,
@@ -87,4 +92,7 @@ __all__ = [
     "segment_episodes_polars",
     "cap_negative_episodes",
     "group_train_test_split",
+    "build_working_set_google",
+    "build_working_set_sql",
+    "SamplingManifest",
 ]
