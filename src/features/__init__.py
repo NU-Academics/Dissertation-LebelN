@@ -18,15 +18,32 @@ Planned submodules:
   construction. Full failure preservation per the Ch. 3 Sampling Strategy.
 - conflict_labels: RQ2 conflict-type labelers (resource contention, priority
   inversion, scheduling violations) and outcome labels.
+- episodes: scheduled-episode (per-attempt) regrain for Google Cluster Traces.
+  Removes the instance-grain lifecycle-history leakage (V30) via strictly-prior
+  history, with episode Tier 2/3 SQL builders and the modeling-stage
+  per-instance negative cap + instance-keyed group split (V32).
 
 Google Tier 1/2/3 modules were extracted from
 ``notebooks/10_feature_engineering_google.py`` after the feature logic was
 validated against the working set (35,133,137 instances). Each module exposes
 pure ``LazyFrame -> LazyFrame`` transforms; the Tier 2/3 modules additionally
 expose BigQuery SQL builders capturing the validated at-scale production path.
+The ``episodes`` module was extracted from notebooks 11b, 10 (Sections 11-12),
+and 11 (Section 3.8) after the per-attempt redesign removed the leakage and met
+the RQ1 >0.90 target at early-runtime on the episode matrix.
 """
 
 from src.features.conflict_labels import label_conflicts
+from src.features.episodes import (
+    build_episode_history_sql,
+    build_episode_intervals_sql,
+    build_episode_runtime_features_sql,
+    build_episode_tier3_features_sql,
+    build_episode_usage_subset_sql,
+    cap_negative_episodes,
+    group_train_test_split,
+    segment_episodes_polars,
+)
 from src.features.historical import (
     add_historical_features,
     add_lifecycle_position,
@@ -62,4 +79,12 @@ __all__ = [
     "add_windowed_utilization",
     "build_windowed_utilization_sql",
     "label_conflicts",
+    "build_episode_history_sql",
+    "build_episode_intervals_sql",
+    "build_episode_usage_subset_sql",
+    "build_episode_runtime_features_sql",
+    "build_episode_tier3_features_sql",
+    "segment_episodes_polars",
+    "cap_negative_episodes",
+    "group_train_test_split",
 ]
