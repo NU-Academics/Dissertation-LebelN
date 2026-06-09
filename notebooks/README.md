@@ -63,9 +63,21 @@ The Phase 3 Google preprocessing notebook. Seven analytical sections plus the ex
 6. **Post-preprocessing assertion suite**: verifies every section's invariants against the EDA-confirmed statistics. A failed assertion blocks the export.
 7. **Export to GCS Parquet plus Drive manifest**: writes the preprocessed events table to `gs://{project_id}-dissertation-data/google_preprocessed/instance_events_preprocessed/` as partitioned Parquet (Drive cannot host a 1.7B-row Parquet) and records the export in `manifest.json`.
 
+### `10_feature_engineering_google.py`
+
+The Google feature-engineering notebook. Sections 0-10 build the instance-grain three-tier matrix (`instance_features`) per the `V13` priority hierarchy: Tier 1 historical/scheduling/temporal, Tier 2 early-runtime slopes via a two-stage BigQuery filter, Tier 3 windowed utilization (ablation only). Sections 11-12 add the **per-attempt (scheduled-episode) redesign** that removes the instance-grain lifecycle-history leakage (`V30`-`V33`): Section 11 segments episodes and builds `episode_lifecycle_features_base` with strictly-prior history (leakage guard PASS; submission+history MCC 0.949 → 0.681); Section 12 adds episode Tier 2/3 by interval assignment and assembles the full `episode_features` matrix (89.68M episodes). Durable outputs are the BigQuery tables and GCS exports (no multi-GB Drive sink for the episode matrix). Logic extracted to `src/features/` (the five tier modules and `episodes.py`).
+
+### `11_preprocessed_eda_google.py`
+
+Validates the engineered matrix and decides working-set adequacy (`P05`). Sections 1-2 re-verify the distribution invariants and the `V12` Tier 3 inversion guard; Section 3 runs the LightGBM learning curve, the leakage diagnostics, and the prediction-point ablation (which surfaced the instance-grain leakage). Section 3.8 is the **episode-grain re-check**: a BigQuery-side capped, instance-keyed group-split extract from `episode_features` runs the honest prediction-point curve (submission 0.666 → early-runtime 0.909, meeting the RQ1 >0.90 target).
+
+### `11b_attempt_structure_google.py`
+
+Characterizes the attempt/episode structure of the event stream before the redesign: event-sequence dumps, episode segmentation reconciliation (99.1% of failures post-schedule, 93.4% well-formed, ~1.2% open, ~5.4% multi-terminal), and the FINISH-doubling analysis (a recurring tail of genuine separate scheduled runs, not duplicate records). Source for the `V30`-`V32` segmentation rules.
+
 ### Planned
 
-`09_backblaze_preprocessing.py`, `10_feature_engineering_google.py`, `11_preprocessed_eda_google.py` are the next preprocessing-and-feature notebooks.
+`09_backblaze_preprocessing.py` and `10_feature_engineering_backblaze.py` are the next preprocessing-and-feature notebooks.
 
 ## Phase 4 onward (planned)
 
