@@ -135,7 +135,11 @@ for directory in (TABLES_DIR, FIGURES_DIR):
 
 VERIFICATION_CSV = TABLES_DIR / 'google_preprocessing_verification.csv'
 TIER3_INVERSION_CSV = TABLES_DIR / 'tier3_inversion_check.csv'
+# The main learning-curve figure is now the episode-grain RQ1 adequacy curve
+# (Section 5). The instance-grain curve is retained as the leakage baseline only
+# (Section 3.5b), with its own file so it is not mistaken for adequacy evidence.
 LEARNING_CURVE_PNG = FIGURES_DIR / 'learning_curve_google.png'
+LEAKED_BASELINE_PNG = FIGURES_DIR / 'learning_curve_google_instance_leaked.png'
 
 LABEL_COL = "failure_label"
 
@@ -435,6 +439,13 @@ assert inversion_ok, (
 # `MAX_BASE_ROWS` (or switch to a High-RAM runtime) and re-run; if it has, the
 # full 35M working set is more than adequate. Features keep float32 and the
 # native `lgb.Dataset(free_raw_data=True)` path is used to bound peak memory.
+#
+# **Grain note.** Sections 3.1-3.7 fit on the instance-grain matrix. The
+# prediction-point ablation (3.7) and the episode re-check (3.8) show that matrix
+# leaks lifecycle history into the label, so this curve is retained only as the
+# leaked baseline (figure in 3.5b). The RQ1 adequacy curve is fit at the episode
+# grain in Section 3.9, and the P05 decision (Section 4) and the main figure
+# (Section 5) read from it.
 
 # %%
 MAX_BASE_ROWS = 12_000_000          # base cap for the curve (raise on High-RAM).
@@ -645,6 +656,41 @@ for i in range(len(FRACTIONS) - 1):
 
 delta_df = pl.DataFrame(delta_rows)
 print(delta_df)
+
+# %% [markdown]
+# ### 3.5b Leaked instance-grain baseline figure
+#
+# This figure plots the instance-grain curve above. It is retained only as the
+# leakage baseline: the prediction-point ablation (3.7) and the episode re-check
+# (3.8) show that the instance-grain matrix leaks lifecycle history into the
+# label, so its near-0.97 MCC is inflated and is NOT the RQ1 adequacy evidence.
+# The honest RQ1 adequacy curve is the episode-grain curve in Section 3.9, and it
+# is the one the P05 decision (Section 4) and the main figure (Section 5) use.
+
+# %%
+_xs = np.array([r["n_train"] for r in curve_rows], dtype=float)
+_ys = np.array([curve_df.filter(pl.col("fraction") == f)["mcc"].item() for f in FRACTIONS])
+_lo = np.array([ci_lo[f] for f in FRACTIONS])
+_hi = np.array([ci_hi[f] for f in FRACTIONS])
+fig, ax = plt.subplots(figsize=(8, 5))
+ax.fill_between(_xs, _lo, _hi, alpha=0.20, color="#9467bd", label="95% bootstrap CI")
+ax.plot(_xs, _ys, marker="o", color="#9467bd", label="Validation MCC (leaked)")
+for f, x, y in zip(FRACTIONS, _xs, _ys):
+    ax.annotate(f"{f:.0%}", (x, y), textcoords="offset points", xytext=(0, 8),
+                ha="center", fontsize=8)
+ax.set_xscale("log")
+ax.set_xlabel("Training instances (log scale)")
+ax.set_ylabel("Matthews correlation coefficient (MCC)")
+ax.set_title("Google Cluster Traces - instance-grain LEAKED baseline (not RQ1 adequacy)")
+ax.text(0.98, 0.04, "Leakage baseline only - see Section 3.9 for RQ1 adequacy",
+        transform=ax.transAxes, ha="right", va="bottom", fontsize=9,
+        bbox=dict(boxstyle="round", fc="#fff3cd", ec="grey", alpha=0.9))
+ax.legend(loc="lower right")
+ax.grid(True, which="both", linestyle=":", alpha=0.5)
+fig.tight_layout()
+fig.savefig(str(LEAKED_BASELINE_PNG), dpi=150)
+print(f"Leaked-baseline figure saved: {LEAKED_BASELINE_PNG}")
+plt.show()
 
 # %% [markdown]
 # ### 3.6 Leakage diagnostics (feature importance + tier ablation)
@@ -1100,31 +1146,205 @@ del ep_train, ep_val
 gc.collect()
 
 # %% [markdown]
-# ---
-# ## 4. P05 working-set adequacy decision
+# ### 3.9 Episode-grain learning curve (RQ1 adequacy base)
 #
-# P05: the working set is adequate when consecutive MCC deltas fall below
-# `P05_DELTA_THRESHOLD` (0.005) in absolute value AND the 95% bootstrap CI on
-# the delta straddles zero. The decision is read off the final transition
-# (50% -> 100% of the base); the full table is reported for context.
+# Sections 3.1-3.7 fit the curve on the instance-grain matrix, which 3.7 and 3.8
+# show is leakage-inflated near MCC 0.97. That curve is the leaked baseline
+# (figure in 3.5b) and is not the RQ1 adequacy evidence. The honest adequacy
+# curve is fit here on the per-attempt `episode_features` census at the
+# early-runtime prediction point (the RQ1-reported configuration, V33), reusing
+# `ep_early_runtime_cols` from 3.8.
+#
+# The base is pulled capped (per-instance negatives limited to `EP_CAP_NEG`,
+# positives never capped) and instance-key group-split, so no instance straddles
+# the train/validation boundary and an instance's earlier and later attempts
+# never leak across it. It is then thinned to roughly `MAX_BASE_ROWS` episodes,
+# exactly mirroring the instance-grain P05 design: if MCC has asymptoted at the
+# cap, the full ~90M-episode census is more than adequate; if not, raise the
+# permille (or use a High-RAM runtime) and re-run. The permilles below are sized
+# for a base near the cap; the printed row counts confirm the realized sizes.
 
 # %%
-final = delta_rows[-1]
+# Free the instance-grain arrays before pulling the episode base (peak memory).
+del X_all, y_all, X_val, y_val
+gc.collect()
+
+EP_CURVE_TRAIN_PERMILLE = 250   # ~25% of the capped train census -> base near MAX_BASE_ROWS
+EP_CURVE_VAL_PERMILLE = 80      # held-out instance-key bucket, thinned for eval speed
+
+
+def _episode_curve_extract_sql(*, train: bool) -> str:
+    """Capped + instance-key group-split episode extract for the learning curve.
+
+    Mirrors the 3.8 re-check extract but with curve-sized permilles so the train
+    side is a base large enough to take learning-curve fractions of. Train caps
+    negatives per instance to ``EP_CAP_NEG`` (positives never capped); the
+    held-out bucket ``EP_TEST_GRP`` is the uncapped validation side.
+    """
+    key = "CONCAT(CAST(collection_id AS STRING),'_',CAST(instance_index AS STRING))"
+    epkey = ("CONCAT(CAST(collection_id AS STRING),'_',CAST(instance_index AS STRING),"
+             "'_',CAST(sched_seq AS STRING))")
+    grp_pred = f"_grp != {EP_TEST_GRP}" if train else f"_grp = {EP_TEST_GRP}"
+    permille = EP_CURVE_TRAIN_PERMILLE if train else EP_CURVE_VAL_PERMILLE
+    cap_clause = f"WHERE failure_label = 1 OR _rn <= {EP_CAP_NEG}" if train else ""
+    rn_col = (
+        ", ROW_NUMBER() OVER (PARTITION BY collection_id, instance_index, failure_label "
+        "ORDER BY _ephash) AS _rn"
+    ) if train else ""
+    return f"""
+WITH split AS (
+    SELECT
+        b.*,
+        MOD(ABS(FARM_FINGERPRINT({key})), 5) AS _grp,
+        ABS(FARM_FINGERPRINT({epkey})) AS _ephash
+    FROM {table_ref(EPISODE_MATRIX_TABLE)} b
+),
+sided AS (
+    SELECT *{rn_col}
+    FROM split
+    WHERE {grp_pred}
+),
+capped AS (
+    SELECT * FROM sided
+    {cap_clause}
+)
+SELECT * FROM capped
+WHERE MOD(_ephash, 1000) < {permille}
+"""
+
+
+print("Pulling episode learning-curve base (capped + instance-key group-split) ...")
+ep_pool_pd = _bq.query(_episode_curve_extract_sql(train=True)).to_dataframe()
+ep_cval_pd = _bq.query(_episode_curve_extract_sql(train=False)).to_dataframe()
+ep_pool = pl.from_pandas(ep_pool_pd)
+ep_cval = pl.from_pandas(ep_cval_pd)
+del ep_pool_pd, ep_cval_pd
+gc.collect()
+
+# RQ1 early-runtime feature set (from 3.8), intersected with the pulled columns.
+EP_CURVE_FEATURES = [c for c in ep_early_runtime_cols if c in ep_pool.columns]
+Xep = ep_pool.select([pl.col(c).cast(pl.Float32) for c in EP_CURVE_FEATURES]).to_numpy()
+yep = ep_pool.select(LABEL_COL).to_numpy().ravel().astype(np.int8)
+Xep_val = ep_cval.select([pl.col(c).cast(pl.Float32) for c in EP_CURVE_FEATURES]).to_numpy()
+yep_val = ep_cval.select(LABEL_COL).to_numpy().ravel().astype(np.int8)
+del ep_pool, ep_cval
+gc.collect()
+print(f"Episode curve base: train pool {Xep.shape[0]:,} x {len(EP_CURVE_FEATURES)} feats "
+      f"({int(yep.sum()):,} positive); validation {Xep_val.shape[0]:,} "
+      f"({int(yep_val.sum()):,} positive).")
+
+# Stratified bootstrap subset of the validation fold (for CI speed).
+if yep_val.size > BOOTSTRAP_VAL_CAP:
+    ep_boot_idx, _ = train_test_split(
+        np.arange(yep_val.size), train_size=BOOTSTRAP_VAL_CAP,
+        random_state=SEED, stratify=yep_val,
+    )
+else:
+    ep_boot_idx = np.arange(yep_val.size)
+yep_boot = yep_val[ep_boot_idx]
+
+# %%
+ep_curve_rows = []
+ep_boot_preds: dict[float, np.ndarray] = {}
+_ep_pool_idx = np.arange(Xep.shape[0])
+for frac in FRACTIONS:
+    n_frac = max(2, int(round(frac * _ep_pool_idx.size)))
+    if n_frac >= _ep_pool_idx.size:
+        sub_idx = _ep_pool_idx
+    else:
+        sub_idx, _ = train_test_split(
+            _ep_pool_idx, train_size=n_frac, random_state=SEED, stratify=yep
+        )
+    dtrain = lgb.Dataset(Xep[sub_idx], label=yep[sub_idx], free_raw_data=True)
+    booster = lgb.train(LGBM_PARAMS, dtrain, num_boost_round=LGBM_NUM_ROUNDS)
+    del dtrain
+    gc.collect()
+    val_pred = (booster.predict(Xep_val) >= 0.5).astype(np.int8)
+    mcc_point = matthews_corrcoef(yep_val, val_pred)
+    ep_boot_preds[frac] = (booster.predict(Xep_val[ep_boot_idx]) >= 0.5).astype(np.int8)
+    ep_curve_rows.append({
+        "fraction": frac, "n_train": int(sub_idx.size),
+        "n_pos_train": int(yep[sub_idx].sum()), "mcc": float(mcc_point),
+    })
+    print(f"  frac={frac:>4.0%}  n_train={sub_idx.size:>10,}  MCC={mcc_point:.4f}")
+    del booster, val_pred
+    gc.collect()
+
+ep_curve_df = pl.DataFrame(ep_curve_rows)
+ep_curve_df.write_csv(str(TABLES_DIR / "google_episode_learning_curve.csv"))
+print(ep_curve_df)
+
+# %%
+# Per-fraction CIs (ribbon) and consecutive-delta CIs (paired resamples), exactly
+# as the instance curve in 3.5 but on the episode validation fold.
+ep_boot_mcc = bootstrap_mcc(yep_boot, ep_boot_preds, N_BOOTSTRAP)
+ep_ci_lo, ep_ci_hi = {}, {}
+for frac in FRACTIONS:
+    ep_ci_lo[frac], ep_ci_hi[frac] = np.percentile(ep_boot_mcc[frac], [2.5, 97.5])
+
+ep_delta_rows = []
+for i in range(len(FRACTIONS) - 1):
+    f0, f1 = FRACTIONS[i], FRACTIONS[i + 1]
+    mcc0 = ep_curve_df.filter(pl.col("fraction") == f0)["mcc"].item()
+    mcc1 = ep_curve_df.filter(pl.col("fraction") == f1)["mcc"].item()
+    delta_point = mcc1 - mcc0
+    delta_boot = ep_boot_mcc[f1] - ep_boot_mcc[f0]
+    d_lo, d_hi = np.percentile(delta_boot, [2.5, 97.5])
+    straddles_zero = bool(d_lo <= 0.0 <= d_hi)
+    converged = bool(abs(delta_point) < P05_DELTA_THRESHOLD and straddles_zero)
+    ep_delta_rows.append({
+        "from_fraction": f0, "to_fraction": f1,
+        "delta_mcc": float(delta_point),
+        "delta_ci_low": float(d_lo), "delta_ci_high": float(d_hi),
+        "ci_straddles_zero": straddles_zero,
+        "converged": converged,
+    })
+
+ep_delta_df = pl.DataFrame(ep_delta_rows)
+print(ep_delta_df)
+ep_n_train_by_frac = {r["fraction"]: r["n_train"] for r in ep_curve_rows}
+
+# %% [markdown]
+# ---
+# ## 4. P05 adequacy decision (episode-grain RQ1 curve)
+#
+# P05: the modeling set is adequate when consecutive MCC deltas fall below
+# `P05_DELTA_THRESHOLD` (0.005) in absolute value AND the 95% bootstrap CI on the
+# delta straddles zero. The decision is read off the final transition
+# (50% -> 100% of the base). This decision uses the **episode-grain** curve from
+# Section 3.9 (the RQ1 modeling grain), not the instance-grain leaked baseline
+# (3.5b). The leaked baseline's P05 is logged separately below for context only.
+
+# %%
+final = ep_delta_rows[-1]
 p05_met = final["converged"]
-print(f"Final transition {final['from_fraction']:.0%} -> {final['to_fraction']:.0%}:")
+print(f"Final transition {final['from_fraction']:.0%} -> {final['to_fraction']:.0%} "
+      f"(episode-grain RQ1 curve):")
 print(f"  delta MCC          = {final['delta_mcc']:+.4f} (threshold {P05_DELTA_THRESHOLD})")
 print(f"  95% CI on delta    = [{final['delta_ci_low']:+.4f}, {final['delta_ci_high']:+.4f}]")
 print(f"  CI straddles zero  = {final['ci_straddles_zero']}")
 print(f"  P05 criterion met  = {p05_met}")
 
 record_check(
-    "Section 4: P05 working-set adequacy at the final transition",
+    "Section 4: P05 episode-grain (RQ1) adequacy at the final transition",
     expected=f"|delta MCC| < {P05_DELTA_THRESHOLD} and 95% CI straddles 0",
     observed=(f"delta={final['delta_mcc']:+.4f}, "
               f"CI=[{final['delta_ci_low']:+.4f}, {final['delta_ci_high']:+.4f}]"),
     ok=p05_met,
-    notes=("Adequate -> the full 35M working set is more than sufficient. "
-           "Not met -> raise MAX_BASE_ROWS (or the 100M ceiling) and re-run."),
+    notes=("Adequate -> the full ~90M-episode census is more than sufficient for "
+           "RQ1. Not met -> raise EP_CURVE_TRAIN_PERMILLE (or use High-RAM) and "
+           "re-run Section 3.9."),
+)
+
+# Context only: the leaked instance-grain baseline's P05 (do not use for RQ1).
+_leaked_final = delta_rows[-1]
+record_check(
+    "Section 4: leaked instance-grain baseline P05 (context only)",
+    expected="informational; instance-grain curve is leakage-inflated (3.7, 3.8)",
+    observed=(f"delta={_leaked_final['delta_mcc']:+.4f}, "
+              f"CI=[{_leaked_final['delta_ci_low']:+.4f}, {_leaked_final['delta_ci_high']:+.4f}]"),
+    ok=True,
+    notes="Reported so the leaked-baseline curve stays auditable; not the RQ1 adequacy test.",
 )
 
 # Re-write the verification log so the P05 row is captured alongside Section 1.
@@ -1134,37 +1354,38 @@ print(f"\nVerification log updated: {VERIFICATION_CSV}")
 
 # %% [markdown]
 # ---
-# ## 5. Learning-curve figure
+# ## 5. Learning-curve figure (episode-grain RQ1 adequacy)
 #
-# MCC vs working-set fraction with the 95% bootstrap CI ribbon. The x-axis is
-# the absolute training-row count (log scale) so the asymptote is legible; the
-# fraction labels annotate each point.
+# Episode-grain MCC vs base fraction with the 95% bootstrap CI ribbon, at the
+# early-runtime prediction point (the RQ1-reported configuration). The x-axis is
+# the absolute training-episode count (log scale) so the asymptote is legible.
+# This is the RQ1 adequacy figure; the leaked instance-grain baseline is the
+# separate figure written in Section 3.5b.
 
 # %%
-n_train_by_frac = {r["fraction"]: r["n_train"] for r in curve_rows}
-xs = np.array([n_train_by_frac[f] for f in FRACTIONS], dtype=float)
-ys = np.array([curve_df.filter(pl.col("fraction") == f)["mcc"].item() for f in FRACTIONS])
-lo = np.array([ci_lo[f] for f in FRACTIONS])
-hi = np.array([ci_hi[f] for f in FRACTIONS])
+xs = np.array([ep_n_train_by_frac[f] for f in FRACTIONS], dtype=float)
+ys = np.array([ep_curve_df.filter(pl.col("fraction") == f)["mcc"].item() for f in FRACTIONS])
+lo = np.array([ep_ci_lo[f] for f in FRACTIONS])
+hi = np.array([ep_ci_hi[f] for f in FRACTIONS])
 
 fig, ax = plt.subplots(figsize=(8, 5))
 ax.fill_between(xs, lo, hi, alpha=0.20, color="#1f77b4", label="95% bootstrap CI")
-ax.plot(xs, ys, marker="o", color="#1f77b4", label="Validation MCC")
+ax.plot(xs, ys, marker="o", color="#1f77b4", label="Validation MCC (early-runtime)")
 for f, x, y in zip(FRACTIONS, xs, ys):
     ax.annotate(f"{f:.0%}", (x, y), textcoords="offset points", xytext=(0, 8),
                 ha="center", fontsize=8)
 ax.set_xscale("log")
-ax.set_xlabel("Training instances (log scale)")
+ax.set_xlabel("Training episodes (attempts, log scale)")
 ax.set_ylabel("Matthews correlation coefficient (MCC)")
-ax.set_title("Google Cluster Traces - working-set learning curve (baseline LightGBM)")
-status = "P05 met (converged)" if p05_met else "P05 not met (increase working set)"
+ax.set_title("Google Cluster Traces - episode-grain learning curve (RQ1, early-runtime LightGBM)")
+status = "P05 met (converged)" if p05_met else "P05 not met (raise EP_CURVE_TRAIN_PERMILLE)"
 ax.text(0.98, 0.04, status, transform=ax.transAxes, ha="right", va="bottom",
         fontsize=9, bbox=dict(boxstyle="round", fc="white", ec="grey", alpha=0.8))
 ax.legend(loc="lower right")
 ax.grid(True, which="both", linestyle=":", alpha=0.5)
 fig.tight_layout()
 fig.savefig(str(LEARNING_CURVE_PNG), dpi=150)
-print(f"Figure saved: {LEARNING_CURVE_PNG}")
+print(f"Episode-grain RQ1 adequacy figure saved: {LEARNING_CURVE_PNG}")
 plt.show()
 
 # %% [markdown]
