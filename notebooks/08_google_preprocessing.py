@@ -656,6 +656,14 @@ WITH per_instance AS (
         ARRAY_AGG(scheduling_class ORDER BY time DESC LIMIT 1)[OFFSET(0)] AS terminal_scheduling_class,
         ARRAY_AGG(machine_id ORDER BY time DESC LIMIT 1)[OFFSET(0)] AS terminal_machine_id,
 
+        -- Submission-time priority / scheduling class (FIRST event by time).
+        -- These are the leak-free at-submission values. The terminal_* fields
+        -- above are end-of-life attributes and must NOT be used as submission
+        -- features: the value at the death event encodes the outcome (e.g. a
+        -- monitoring-priority terminal is almost always FAIL/LOST), which leaks.
+        ARRAY_AGG(priority ORDER BY time ASC LIMIT 1)[OFFSET(0)] AS submit_priority,
+        ARRAY_AGG(scheduling_class ORDER BY time ASC LIMIT 1)[OFFSET(0)] AS submit_scheduling_class,
+
         -- Resource requests (use the first non-null value over the instance)
         ANY_VALUE(cpu_request) AS cpu_request,
         ANY_VALUE(memory_request) AS memory_request

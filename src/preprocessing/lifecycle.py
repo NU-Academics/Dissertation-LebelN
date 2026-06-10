@@ -182,6 +182,12 @@ WITH per_instance AS (
         ARRAY_AGG(priority ORDER BY time DESC LIMIT 1)[OFFSET(0)] AS terminal_priority,
         ARRAY_AGG(scheduling_class ORDER BY time DESC LIMIT 1)[OFFSET(0)] AS terminal_scheduling_class,
         ARRAY_AGG(machine_id ORDER BY time DESC LIMIT 1)[OFFSET(0)] AS terminal_machine_id,
+        -- Submission-time (FIRST event by time) priority / scheduling class:
+        -- the leak-free at-submission values. terminal_* above are end-of-life
+        -- attributes that encode the outcome and must not be used as submission
+        -- features (see NB12 Sec 3.2-3.4 leak diagnosis; eda_decisions V33-leak).
+        ARRAY_AGG(priority ORDER BY time ASC LIMIT 1)[OFFSET(0)] AS submit_priority,
+        ARRAY_AGG(scheduling_class ORDER BY time ASC LIMIT 1)[OFFSET(0)] AS submit_scheduling_class,
         ANY_VALUE(cpu_request) AS cpu_request,
         ANY_VALUE(memory_request) AS memory_request
     FROM {fq_source}
