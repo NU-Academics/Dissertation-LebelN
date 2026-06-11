@@ -1,6 +1,6 @@
 # `tests/` — Test Suite
 
-Pytest test suite for the extracted `src/` modules. Synthetic Polars LazyFrame fixtures hand-crafted to hit each branch. No BigQuery, no Drive, no GCS. Fast: the Phase 3 Week 2 suite runs in under a second on a laptop.
+Pytest test suite for the extracted `src/` modules. Synthetic Polars LazyFrame fixtures hand-crafted to hit each branch. No BigQuery, no Drive, no GCS. Fast: the Phase 3 suite runs in under a second on a laptop.
 
 ## Running
 
@@ -30,7 +30,7 @@ Repo-skeleton sanity checks that must remain green throughout Chapter 4 executio
 - `test_src_subpackages_importable` confirms every `src/` subpackage imports cleanly.
 - `test_random_seed_constant_is_42` locks the reproducibility contract. If this assertion needs to change, the entire reproducibility plan in Chapter 3 is being modified and must be updated first.
 
-### `test_preprocessing.py` (Phase 3 Week 2)
+### `test_preprocessing.py` (Phase 3)
 
 Unit tests for the four pure functions in `src/preprocessing/google_traces.py`. Each fixture is hand-crafted to hit the branches the function must handle.
 
@@ -43,7 +43,7 @@ Unit tests for the four pure functions in `src/preprocessing/google_traces.py`. 
 - `test_mnar_indicators_per_instance_majority` covers `V28` with five hand-crafted instances (all-present, all-absent, 60% majority, 40% minority, exact 50% boundary).
 - `test_mnar_indicators_opt_in_skips_majority_column` confirms the opt-in flag.
 
-### `test_lifecycle.py` (Phase 3 Week 2)
+### `test_lifecycle.py` (Phase 3)
 
 Unit tests for the lifecycle reconstruction semantics. A private Polars-native helper `_reconstruct_lifecycle_polars` mirrors the BigQuery DDL in `src/preprocessing/lifecycle.py::_build_lifecycle_ddl`. Tests build small synthetic event tables, run the helper, and assert on the resulting per-instance summary. The BigQuery path itself is validated end-to-end against the EDA-confirmed statistics during `notebooks/08_google_preprocessing.py` Section 5.
 
@@ -75,10 +75,10 @@ Four unit tests for `src/features/sampling.py` (`P01`). Synthetic instance-event
 
 ### Planned
 
-- `test_features.py` (Week 3): Tier 1 / 2 / 3 feature derivations against synthetic LazyFrames.
-- `test_metrics.py` (Week 4): MCC, F1, PR-AUC, bootstrap CIs against ground-truth synthetic predictions.
-- `test_hypothesis.py` (Week 4): Holm-Bonferroni and Benjamini-Hochberg family-wise error control.
-- `test_drift_detectors.py` (Week 9): ADWIN, Page-Hinkley, KS, PSI behavior under synthetic drift.
+- `test_features.py` (Phase 3): Tier 1 / 2 / 3 feature derivations against synthetic LazyFrames.
+- `test_metrics.py` (Phase 4): MCC, F1, PR-AUC, bootstrap CIs against ground-truth synthetic predictions.
+- `test_hypothesis.py` (Phase 4): Holm-Bonferroni and Benjamini-Hochberg family-wise error control.
+- `test_drift_detectors.py` (Phase 7): ADWIN, Page-Hinkley, KS, PSI behavior under synthetic drift.
 
 ## Fixture conventions
 

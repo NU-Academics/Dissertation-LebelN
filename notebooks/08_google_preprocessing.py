@@ -18,12 +18,12 @@
 #
 # **Purpose.** Apply the Phase 2 and Phase 3 front-loaded EDA decisions
 # (V01-V13, V25-V28) to produce a preprocessed `instance_events` slice
-# suitable for feature engineering in Week 3. The heavy work is pushed to
+# suitable for feature engineering. The heavy work is pushed to
 # BigQuery (transformations and joins against the 1.72B-row
 # `instance_events_full` table); Polars LazyFrames handle in-memory
 # assertions on materialized result tables.
 #
-# **Status.** Week 2 deliverable of the 11-week Chapter 4 plan. This
+# **Status.** A Phase 3 (Data Preparation) deliverable. This
 # notebook is exploratory; once each section validates against the EDA
 # numbers, the next step extracts the logic into `src/preprocessing/google_traces.py`
 # and `src/preprocessing/lifecycle.py`.
@@ -442,7 +442,7 @@ record_check(
 #   observation level.
 # - **Per-instance majority vote**
 #   (`has_hardware_counters_majority`): added to a per-instance
-#   summary table so feature engineering in Week 3 consumes one stable
+#   summary table so feature engineering consumes one stable
 #   indicator per (collection_id, instance_index). Per V28, threshold
 #   is 50% of observations carrying counters.
 
@@ -1066,9 +1066,9 @@ manifest = {
         "V09 + V10 lifecycle summary table (resubmission count, queue time, running duration)",
     ],
     "downstream_inputs_required": [
-        "instance_lifecycle_summary (for Tier 1 features in Week 3)",
-        "instance_usage_with_indicators (for Tier 2 features in Week 3)",
-        "instance_hardware_counters_majority (for has_hardware_counters in Week 3)",
+        "instance_lifecycle_summary (for Tier 1 features)",
+        "instance_usage_with_indicators (for Tier 2 features)",
+        "instance_hardware_counters_majority (for has_hardware_counters)",
     ],
 }
 

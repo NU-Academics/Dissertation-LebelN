@@ -185,7 +185,7 @@ WITH per_instance AS (
         -- Submission-time (FIRST event by time) priority / scheduling class:
         -- the leak-free at-submission values. terminal_* above are end-of-life
         -- attributes that encode the outcome and must not be used as submission
-        -- features (see NB12 Sec 3.2-3.4 leak diagnosis; eda_decisions V33-leak).
+        -- features (the leak-free at-submission source; eda_decisions V35).
         ARRAY_AGG(priority ORDER BY time ASC LIMIT 1)[OFFSET(0)] AS submit_priority,
         ARRAY_AGG(scheduling_class ORDER BY time ASC LIMIT 1)[OFFSET(0)] AS submit_scheduling_class,
         ANY_VALUE(cpu_request) AS cpu_request,

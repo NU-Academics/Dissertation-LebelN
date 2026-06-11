@@ -25,7 +25,7 @@
 # the preprocessing module inherits the resolved decision through the same
 # audit trail used in notebook 07.
 #
-# **Status.** Week 2 deliverable of the 11-week Chapter 4 plan. Runs against
+# **Status.** A Phase 3 (Data Preparation) deliverable. Runs against
 # the full cached `instance_events_full` and `instance_usage_full` tables.
 # Phase 2 query patterns (helpers, fqn, save_table, save_figure) are reused
 # verbatim from notebook 03.
@@ -691,7 +691,7 @@ append_decision(
 #
 # **Decision rule.** If monitoring EVICTs pattern-match FAIL_LOST, add a
 # third sensitivity column (`failure_label_sensitivity_v2`) in
-# preprocessing and run the corresponding sensitivity branch in Week 10.
+# preprocessing and run the corresponding sensitivity branch in Phase 5.
 # If they pattern-match scheduled preemption, document the exclusion
 # rationale and stop. Default: exclude unless the profile is closer to
 # FAIL than to scheduled preemption.

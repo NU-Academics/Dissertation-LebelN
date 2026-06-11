@@ -3,12 +3,12 @@
 Verifies the src/ subpackages are importable. As modules are extracted from
 notebooks during Phases 3 and 4, replace these import-only assertions with
 substantive unit tests in:
-- tests/test_preprocessing.py (Week 2)
-- tests/test_features.py (Week 3)
-- tests/test_metrics.py (Week 4)
-- tests/test_hypothesis.py (Week 4)
-- tests/test_sampling.py (Week 3 and 7)
-- tests/test_drift_detectors.py (Week 9)
+- tests/test_preprocessing.py (Phase 3)
+- tests/test_features.py (Phase 3)
+- tests/test_metrics.py (Phase 4)
+- tests/test_hypothesis.py (Phase 4)
+- tests/test_sampling.py (Phase 3)
+- tests/test_drift_detectors.py (Phase 7)
 """
 
 import importlib

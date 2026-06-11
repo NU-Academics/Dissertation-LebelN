@@ -42,7 +42,7 @@ Markdown-forward consolidation of every Phase 2 finding. Section 4 materializes 
 
 ### `07b_phase3_front_loaded_eda.py`
 
-Four front-loaded EDA checks executed at the start of Week 2 to resolve open items that shape preprocessing:
+Four front-loaded EDA checks executed early in Phase 3 (Data Preparation) to resolve open items that shape preprocessing:
 
 - **F1** (sentinel timestamp inventory) closes `O04` and produces `V25`. Sentinel-bearing rows are dropped outright in preprocessing.
 - **F2** (diurnal and weekly density patterns) closes `O01` and produces `V26`. Hour-of-day and day-of-week bucketing operates in PDT wall-clock; FAIL_LOST rate varies up to ~8x across hour buckets, motivating stratified chronological splits and temporal features.

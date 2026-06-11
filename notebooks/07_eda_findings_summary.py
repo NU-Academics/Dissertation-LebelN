@@ -22,7 +22,7 @@
 # narrative document. This notebook is the bridge between Phase 2 (Data Understanding) and
 # Phase 3 (Data Preparation).
 #
-# **Status.** Week 1 deliverable of the 11-week Chapter 4 plan. Markdown-forward
+# **Status.** An early deliverable of the Chapter 4 plan. Markdown-forward
 # (Phase 2 executed every analytical query; this notebook does not re-derive).
 #
 # **Outputs.**
@@ -90,7 +90,7 @@ print(f"Decisions CSV: {DECISIONS_CSV}")
 # excluded from the primary target.
 #
 # Sensitivity: Production-priority EVICTs (`type = 4 AND priority >= 120`)
-# additionally treated as failures in the sensitivity branch (Week 10, Phase 5).
+# additionally treated as failures in the sensitivity branch (Phase 5).
 #
 # Class ratio after labeling: 73,611,983 successes vs 21,709,490 failures
 # (3.4:1, moderate imbalance, manageable with cost-sensitive learning + SMOTE).
@@ -277,15 +277,15 @@ DECISIONS = [
 
     ("V02", "Imbalance Strategy", "Google", "Cost-sensitive learning + SMOTE; 3.4:1 ratio judged manageable without extreme oversampling",
      "73.6M FINISH vs 21.7M FAIL_LOST (notebook 03 Sec 7.2)", "Notebook 03 Sec 7.8; Li et al. (2021)",
-     "RQ1, RQ2", "Validated (Phase 2)", "Approach confirmed Phase 4 Week 4 modeling"),
+     "RQ1, RQ2", "Validated (Phase 2)", "Approach confirmed Phase 4 modeling"),
 
     ("V03", "Null Handling: machine_id", "Google", "Do not impute machine_id; filter to post-scheduling event types when joining",
      "Structural nulls (95-99%) for pre-scheduling events (notebook 03 Sec 7.3)", "Notebook 03 Sec 7.3 + 7.8",
-     "RQ1, RQ4", "Validated (Phase 2)", "Implemented Phase 3 Week 2 preprocessing module"),
+     "RQ1, RQ4", "Validated (Phase 2)", "Implemented Phase 3 preprocessing module"),
 
     ("V04", "Null Handling: Resources", "Google", "Drop or median-impute the 47,933 rows with missing cpu_request or memory_request",
      "0.003% null rate (notebook 03 Sec 7.3)", "Notebook 03 Sec 7.3 + 7.8",
-     "RQ1, RQ4", "Validated (Phase 2)", "Implemented Phase 3 Week 2"),
+     "RQ1, RQ4", "Validated (Phase 2)", "Implemented Phase 3"),
 
     ("V05", "Null Handling: Usage Columns", "Google", "Drop sample_memory column entirely; investigate CPI/MAPI further before deciding",
      "sample_memory is 100% null; CPI/MAPI 20.5% null pending follow-up (notebook 03 Sec 7.3)", "Notebook 03 Sec 7.3 + 7.8",
@@ -293,15 +293,15 @@ DECISIONS = [
 
     ("V06", "Temporal Split", "Google", "Chronological 70/15/15 train/val/test with blocked temporal CV inside training",
      "31-day coverage (notebook 03 Sec 7.4)", "Notebook 03 Sec 7.8; Bergmeir & Benitez (2012); Raschka (2018)",
-     "RQ1, RQ2, RQ3, RQ4", "Validated (Phase 2)", "Implemented Phase 4 Week 4"),
+     "RQ1, RQ2, RQ3, RQ4", "Validated (Phase 2)", "Implemented Phase 4"),
 
     ("V07", "Machine Features", "Google", "Include platform, capacity, failure history, and churn metrics in the feature set",
      "Platform correlates with failure density (notebook 03 Sec 7.6)", "Notebook 03 Sec 7.6 + 7.8; Zhang et al. (2023)",
-     "RQ1, RQ4", "Validated (Phase 2)", "Implemented Phase 3 Week 3"),
+     "RQ1, RQ4", "Validated (Phase 2)", "Implemented Phase 3"),
 
     ("V08", "KILL Handling", "Google", "Exclude KILL events entirely from analysis",
      "Type 7 is user-initiated cancellation, not predictable system behavior (notebook 03 Sec 7.2.2)", "Notebook 03 Sec 7.2 + 7.8",
-     "RQ1", "Validated (Phase 2)", "Implemented Phase 3 Week 2"),
+     "RQ1", "Validated (Phase 2)", "Implemented Phase 3"),
 
     # --- VALIDATED (Phase 2): from three Google follow-up queries (resolved Open Questions #3, #4, #6) ---
     ("V09", "Failure Mechanism", "Google", "Rapid-onset failure model: median FAIL_LOST running duration 22.6s vs FINISH 181.0s; 93.8% crash in 10s to 1min",
@@ -314,7 +314,7 @@ DECISIONS = [
 
     ("V11", "CPI/MAPI Encoding", "Google", "Indicator + conditional value encoding (MNAR), not MAR imputation",
      "Workload-type driven nulls: FINISH 87.2% null vs FAIL_LOST 26.8% null. Resolved Open Question #6", "sql/exploration/cpi_mapi_missingness_structure.sql",
-     "RQ1, RQ3", "Validated (Phase 2)", "Implemented Phase 3 Week 2"),
+     "RQ1, RQ3", "Validated (Phase 2)", "Implemented Phase 3"),
 
     ("V12", "Pre-Failure Utilization", "Google", "Utilization inversion: failing instances use LESS CPU/memory (FAIL_LOST median 0.012 vs FINISH 0.081) but ramp 3.6x faster CPU and 2.3x faster memory",
      "Pre-failure utilization query resolved Open Question #4", "sql/exploration/pre_failure_utilization_profiles.sql",
@@ -322,24 +322,24 @@ DECISIONS = [
 
     ("V13", "Feature Tier Structure", "Google", "Tier 1 (pre-scheduling + historical) dominates; Tier 2 (early-runtime slopes) moderate; Tier 3 (windowed utilization) confounded by short crash window",
      "Synthesis of V09, V10, V11, V12", "Three follow-up queries (Phase 2 synthesis)",
-     "RQ1, RQ3", "Validated (Phase 2)", "Phase 4 Week 6 feature ablation will empirically retest"),
+     "RQ1, RQ3", "Validated (Phase 2)", "Phase 4 feature ablation will empirically retest"),
 
     # --- VALIDATED (Phase 2): from notebook 05 Sec 7.8 Backblaze preliminary decisions ---
     ("V14", "Primary SMART Features", "Backblaze", "SMART 197 (raw), 5 (raw), 198 (raw)",
      "AUC 0.7367, 0.7323, 0.6815 (top 3 per notebook 05)", "Notebook 05 Sec 7.8 D1; Cheng et al. (2022); Zhang et al. (2023)",
-     "RQ1, RQ3, RQ5", "Validated (Phase 2)", "Built Phase 3 Week 7"),
+     "RQ1, RQ3, RQ5", "Validated (Phase 2)", "Built Phase 3"),
 
     ("V15", "Secondary SMART Features", "Backblaze", "SMART 4, 12, 193, 240, 1, 7, 9 as supplementary discriminators",
      "AUC > 0.56; cumulative wear indicators (notebook 05)", "Notebook 05 Sec 7.8 D2",
-     "RQ1, RQ3, RQ5", "Validated (Phase 2)", "Built Phase 3 Week 7"),
+     "RQ1, RQ3, RQ5", "Validated (Phase 2)", "Built Phase 3"),
 
     ("V16", "SMART 187/188 Handling", "Backblaze", "Conditional inclusion with availability indicator encoding",
      "49.5% availability (notebook 05); literature priority but data gap", "Notebook 05 Sec 7.8 D3",
-     "RQ1, RQ3", "Validated (Phase 2)", "Built Phase 3 Week 7; O08 explores post-2015 recovery"),
+     "RQ1, RQ3", "Validated (Phase 2)", "Built Phase 3; O08 explores post-2015 recovery"),
 
     ("V17", "Imbalance Strategy", "Backblaze", "Cost-sensitive learning + severe undersampling; evaluate anomaly detection framing",
      "21,947:1 ratio at daily-observation level (notebook 05)", "Notebook 05 Sec 7.8 D4; Li et al. (2021)",
-     "RQ1, RQ5", "Validated (Phase 2)", "Implemented Phase 3 Week 7 + Phase 4 Week 8"),
+     "RQ1, RQ5", "Validated (Phase 2)", "Implemented Phase 3 + Phase 4"),
 
     ("V18", "Model Stratification", "Backblaze", "Include model identity as feature; evaluate per-manufacturer sub-models",
      "AUC spread up to 0.2744 across top-5 drive models (notebook 05)", "Notebook 05 Sec 7.8 D5; Zhang et al. (2023)",
@@ -347,19 +347,19 @@ DECISIONS = [
 
     ("V19", "Feature Engineering Approach", "Backblaze", "Sliding-window temporal features: rolling mean, rolling std, rate-of-change, binary non-zero indicators",
      "Gradual degradation pattern + zero-inflation (notebook 05)", "Notebook 05 Sec 7.8 D6",
-     "RQ1, RQ3, RQ5", "Validated (Phase 2)", "Built Phase 3 Week 7; window length still open (see O06)"),
+     "RQ1, RQ3, RQ5", "Validated (Phase 2)", "Built Phase 3; window length still open (see O06)"),
 
     ("V20", "Temporal Evaluation Strategy", "Backblaze", "Expanding-window or sliding-window cross-validation across years",
      "Non-stationary failure rates and fleet composition drift (notebook 05)", "Notebook 05 Sec 7.8 D7; Bergmeir & Benitez (2012); Campos et al. (2023)",
-     "RQ1, RQ5", "Validated (Phase 2)", "Implemented Phase 4 Week 8 + Phase 7 Week 9"),
+     "RQ1, RQ5", "Validated (Phase 2)", "Implemented Phase 4 + Phase 7"),
 
     ("V21", "Online Learning Justified", "Backblaze", "Online and incremental learning approach justified for RQ5",
      "21x monthly failure-rate range; schema evolution; 12-year fleet turnover (notebook 05)", "Notebook 05 Sec 7.8 D8; AlShafeey & Csaki (2024)",
-     "RQ5", "Validated (Phase 2)", "Executed Phase 7 Week 9"),
+     "RQ5", "Validated (Phase 2)", "Executed Phase 7"),
 
     ("V22", "Prediction Framing", "Backblaze", "Daily sliding-window prediction with multi-day lookahead",
      "Gradual degradation supports temporal features; contrasts with Google at-submission architecture", "Notebook 05 Sec 7.8 D9",
-     "RQ1, RQ3", "Validated (Phase 2)", "Implemented Phase 4 Week 8 (specific horizons in P07)"),
+     "RQ1, RQ3", "Validated (Phase 2)", "Implemented Phase 4 (specific horizons in P07)"),
 
     ("V23", "Evaluation Metrics for Imbalance", "Both", "MCC, PR-AUC, F1 as primary metrics; not accuracy or standard ROC-AUC",
      "Extreme class imbalance makes accuracy uninformative", "Notebook 05 Sec 7.8 D10; Chicco & Jurman (2023); Saito & Rehmsmeier (2015)",
@@ -373,19 +373,19 @@ DECISIONS = [
     # --- PLANNED (DP): committed in DP Chapter 3 but not yet empirically validated ---
     ("P01", "Working Set Size", "Google", "Target 50-100 million instance events via collection-level stratified sampling",
      "Sample-size guidance from Rajput et al. (2023); compute envelope of Colab T4", "DP Ch. 3 Sampling Strategy",
-     "RQ1, RQ2, RQ3, RQ4", "Planned (DP)", "Learning-curve validation in Phase 3 Week 3"),
+     "RQ1, RQ2, RQ3, RQ4", "Planned (DP)", "Learning-curve validation in Phase 3"),
 
     ("P02", "Working Set Ratio", "Backblaze", "100:1 healthy-to-failure ratio (~3.13M observations) with full failure preservation",
      "Imbalance-handling recommendations from Saito & Rehmsmeier (2015), Chicco & Jurman (2023)", "DP Ch. 3 Sampling Strategy",
-     "RQ1, RQ3, RQ5", "Planned (DP)", "Learning-curve validation in Phase 3 Week 7"),
+     "RQ1, RQ3, RQ5", "Planned (DP)", "Learning-curve validation in Phase 3"),
 
     ("P03", "Sensitivity Branches", "Backblaze", "Build 50:1 and 200:1 working sets alongside 100:1",
      "Tests robustness of the 100:1 choice to working-set construction", "DP Ch. 3 Sampling Strategy",
-     "RQ1", "Planned (DP)", "Sensitivity analysis in Phase 5 Week 10"),
+     "RQ1", "Planned (DP)", "Sensitivity analysis in Phase 5"),
 
     ("P04", "Sensitivity Branch", "Google", "Production-priority EVICTs (type 4, priority >= 120) added as failures in sensitivity analysis",
      "Tests whether production evictions exhibit distinct predictive patterns; only 0.13% of EVICTs", "Notebook 03 Sec 7.2.2 + DP Ch. 3",
-     "RQ1", "Planned (DP)", "Sensitivity analysis in Phase 5 Week 10"),
+     "RQ1", "Planned (DP)", "Sensitivity analysis in Phase 5"),
 
     ("P05", "Sample-Size Adequacy", "Both", "Learning curve at 1/5/10/25/50/100% of working set; convergence when MCC delta < 0.005 with 95% CI straddling zero",
      "Procedure committed in DP", "DP Ch. 3 Sampling Strategy",
@@ -393,11 +393,11 @@ DECISIONS = [
 
     ("P06", "Prediction Architecture", "Google", "Three-level prediction (at-submission primary, at-scheduling secondary, early-runtime sensitivity)",
      "Motivated by V09 rapid-onset model; runtime windows infeasible at the dominant failure mode", "DP Ch. 3 RQ1 specification",
-     "RQ1, RQ3", "Planned (DP)", "Built Phase 4 Week 4"),
+     "RQ1, RQ3", "Planned (DP)", "Built Phase 4"),
 
     ("P07", "Multi-Horizon Prediction", "Backblaze", "Predict at 7-day, 14-day, and 30-day horizons",
      "Exploits the gradual SMART degradation pattern (V09 contrast)", "DP Ch. 3 RQ1 Backblaze + Notebook 05 D9",
-     "RQ1, RQ3", "Planned (DP)", "Built Phase 4 Week 8"),
+     "RQ1, RQ3", "Planned (DP)", "Built Phase 4"),
 
     ("P08", "Hyperparameter Tuning Strategy", "Both", "Bayesian optimization for LightGBM and XGBoost (50 trials per family); grid search for Random Forest",
      "Efficient for high-dimensional parameter spaces", "DP Ch. 3 Hyperparameter Tuning Strategy; Snoek et al. (2012)",
@@ -405,27 +405,27 @@ DECISIONS = [
 
     ("P09", "RQ2 Conflict Types", "Google", "Three conflict types labeled: resource contention, priority inversion, scheduling violations",
      "Operational definitions from DP", "DP Ch. 3 RQ2 specification",
-     "RQ2", "Planned (DP)", "Built Phase 4 Week 5"),
+     "RQ2", "Planned (DP)", "Built Phase 4"),
 
     ("P10", "RQ4 Proactive Strategies", "Google", "Three strategies compared against reactive baseline: preemptive migration, admission control, capacity-aware bin packing",
      "Operational definitions from DP", "DP Ch. 3 RQ4 specification",
-     "RQ4", "Planned (DP)", "Built Phase 4 Week 6 (depends on V09/P06 RQ1 outputs)"),
+     "RQ4", "Planned (DP)", "Built Phase 4 (depends on V09/P06 RQ1 outputs)"),
 
     ("P11", "RQ5 Drift Taxonomy", "Backblaze", "Address four drift subtypes (sudden, gradual, incremental, recurring) each with a specific detector-mitigation pair",
      "Castano et al. (2025); Lu et al. (2018) drift taxonomy", "DP Ch. 3 RQ5 specification",
-     "RQ5", "Planned (DP)", "Executed Phase 7 Week 9"),
+     "RQ5", "Planned (DP)", "Executed Phase 7"),
 
     ("P12", "RQ5 Drift Detectors", "Backblaze", "ADWIN and Page-Hinkley (sudden); KS and PSI (gradual); long-horizon performance tracking (incremental); distributional similarity (recurring)",
      "Detector selection per subtype follows Lu et al. (2018)", "DP Ch. 3 RQ5 specification",
-     "RQ5", "Planned (DP)", "Built Phase 7 Week 9"),
+     "RQ5", "Planned (DP)", "Built Phase 7"),
 
     ("P13", "RQ5 Online Learners", "Backblaze", "Adaptive Random Forest, Hoeffding Adaptive Tree, Online Gradient Boosting (River implementations)",
      "Library validated by AlShafeey & Csaki (2024); Liu & Zhao (2023)", "DP Ch. 3 RQ5 specification",
-     "RQ5", "Planned (DP)", "Built Phase 7 Week 9"),
+     "RQ5", "Planned (DP)", "Built Phase 7"),
 
     ("P14", "Random Seed Convention", "Both", "Random seed = 42 across every stochastic operation",
      "Reproducibility per Allgaier & Pryss (2024) and Raschka (2018)", "DP Ch. 3 Reproducibility Plan",
-     "RQ1, RQ2, RQ3, RQ4, RQ5", "Planned (DP)", "Enforced from Phase 3 Week 2 onward"),
+     "RQ1, RQ2, RQ3, RQ4, RQ5", "Planned (DP)", "Enforced from Phase 3 onward"),
 
     ("P15", "Confidence Interval Method", "Both", "95% bootstrap CIs with 1,000 stratified resamples on every reported metric",
      "Stratified bootstrap preserves class balance per resample", "DP Ch. 3 Classification Metrics; Michelucci & Venturini (2021)",
@@ -433,65 +433,65 @@ DECISIONS = [
 
     ("P16", "Family-Wise Error Control", "Both", "Holm-Bonferroni primary, Benjamini-Hochberg supporting; both reported across the five RQs",
      "Strong control across primary hypothesis tests", "DP Ch. 3 Data Analysis",
-     "RQ1, RQ2, RQ3, RQ4, RQ5", "Planned (DP)", "Applied Phase 5 Week 10"),
+     "RQ1, RQ2, RQ3, RQ4, RQ5", "Planned (DP)", "Applied Phase 5"),
 
     ("P17", "Interpretability Sampling", "Both", "Sample-based SHAP (target 10,000-20,000 stratified rows) rather than population",
      "Tractable compute; global rankings stabilize at this sample size", "DP Ch. 3 Model Interpretability",
-     "RQ1", "Planned (DP)", "Executed Phase 5 Week 10"),
+     "RQ1", "Planned (DP)", "Executed Phase 5"),
 
     ("P18", "Reporting Standard", "Both", "TRIPOD+AI 27-item checklist with explicit cross-references to notebooks, tables, and figures",
      "Standard for ML prediction model reporting", "DP Ch. 3 Materials and Methods; Collins et al. (2024)",
-     "RQ1, RQ2, RQ3, RQ4, RQ5", "Planned (DP)", "Completed Phase 6 Week 11"),
+     "RQ1, RQ2, RQ3, RQ4, RQ5", "Planned (DP)", "Completed Phase 6"),
 
     ("P19", "Regeneration Pipeline", "Both", "Single Notebook 19 regenerates every Chapter 4 table and figure from result Parquets",
      "Hermetic regeneration prevents drift between draft prose and source artifacts", "Phase 6",
-     "RQ1, RQ2, RQ3, RQ4, RQ5", "Planned (DP)", "Built Phase 6 Week 11"),
+     "RQ1, RQ2, RQ3, RQ4, RQ5", "Planned (DP)", "Built Phase 6"),
 
     # --- OPEN: questions still under investigation, from notebook 03 Sec 7.7 (4 remaining) ---
     ("O01", "Temporal Patterns", "Google", "Do event densities and failure rates vary by time of day or day of week?",
      "Determines whether temporal features (hour, weekday) are informative and whether temporal stratification is needed", "Notebook 03 Sec 7.7 #1",
-     "RQ1, RQ3", "Open", "Investigate Phase 3 Week 3 (post-preprocessing EDA)"),
+     "RQ1, RQ3", "Open", "Investigate Phase 3 (post-preprocessing EDA)"),
 
     ("O02", "Monitoring-Tier Evictions", "Google", "Are the 7.8M monitoring-priority evictions (6.7% of all EVICTs) health-check/canary processes or genuine infrastructure issues?",
      "Could warrant a third sensitivity branch beyond P04 Production EVICTs", "Notebook 03 Sec 7.7 #2",
-     "RQ1", "Open", "Investigate Phase 3 Week 2; potential sensitivity branch in Phase 5 Week 10"),
+     "RQ1", "Open", "Investigate Phase 3; potential sensitivity branch in Phase 5"),
 
     ("O03", "Collection-Level Concentration", "Google", "Are failures concentrated in certain collections? collection_type 0 dominates (99.3% of events). Is collection_type informative or essentially constant?",
      "Material to RQ2 conflict labeling and to within-collection correlation structure", "Notebook 03 Sec 7.7 #5",
-     "RQ2", "Open", "Investigate Phase 4 Week 5 during RQ2 conflict labeling"),
+     "RQ2", "Open", "Investigate Phase 4 during RQ2 conflict labeling"),
 
     ("O04", "Sentinel Timestamp Handling", "Google", "How many instances have time=0 or time=MAX_INT64? Exclude as censored or handle as left/right-censored data?",
      "Affects lifecycle feature computation", "Notebook 03 Sec 7.7 #7",
-     "RQ1, RQ3", "Open", "Resolve in Phase 3 Week 2 preprocessing"),
+     "RQ1, RQ3", "Open", "Resolve in Phase 3 preprocessing"),
 
     # --- OPEN: questions still under investigation, from notebook 05 Sec 7.7 (all 7 remain) ---
     ("O05", "Backblaze Non-Zero Indicators", "Backblaze", "Should binary indicators (has_nonzero_smart_*) be engineered alongside raw values and rolling stats? Are upper quantiles (p90, p95, p99) more discriminative than medians or means?",
      "Zero-inflation in SMART 197, 5, 198", "Notebook 05 Sec 7.7 #1",
-     "RQ1, RQ3", "Open", "Investigate Phase 3 Week 7 feature engineering"),
+     "RQ1, RQ3", "Open", "Investigate Phase 3 feature engineering"),
 
     ("O06", "Backblaze Window Length", "Backblaze", "What window lengths (7, 14, 30, 60 days) maximize predictive power for rate-of-change features?",
      "Degradation curves suggest 90-day detectability but zero-inflation complicates", "Notebook 05 Sec 7.7 #2",
-     "RQ1, RQ3", "Open", "Investigate Phase 3 Week 7 + Phase 4 Week 8"),
+     "RQ1, RQ3", "Open", "Investigate Phase 3 + Phase 4"),
 
     ("O07", "Backblaze Stratification Depth", "Backblaze", "Should stratification be at the model level (dozens of sub-models), the manufacturer level (3-4 groups: Seagate, HGST/WDC, Toshiba, Hitachi), or via model-identity features in a global classifier?",
      "Heatmap shows AUC variation up to 0.27 across drive models", "Notebook 05 Sec 7.7 #3",
-     "RQ1", "Open", "Investigate Phase 4 Week 8"),
+     "RQ1", "Open", "Investigate Phase 4"),
 
     ("O08", "Backblaze SMART 187/188 Recovery", "Backblaze", "Can availability be improved by restricting to post-2015 files (where schema expanded)? Does discriminative power justify separate model branches?",
      "~49.5% availability; literature-standard but data gap", "Notebook 05 Sec 7.7 #4",
-     "RQ1", "Open", "Investigate Phase 3 Week 7 + Phase 4 Week 8"),
+     "RQ1", "Open", "Investigate Phase 3 + Phase 4"),
 
     ("O09", "Backblaze Survival Modeling", "Backblaze", "For RQ3 (lead time analysis), should Backblaze support survival analysis (Cox PH or accelerated failure time) using days-from-first-observation-to-failure?",
      "EDA focused on binary failure prediction; RQ3 is about lead time", "Notebook 05 Sec 7.7 #5",
-     "RQ3", "Open", "Investigate Phase 4 Week 8 (RQ3 Backblaze)"),
+     "RQ3", "Open", "Investigate Phase 4 (RQ3 Backblaze)"),
 
     ("O10", "Backblaze Seasonal Features", "Backblaze", "Should month/quarter indicators be included, or is the signal too weak to justify the features?",
      "46% relative seasonal variation is modest but consistent", "Notebook 05 Sec 7.7 #6",
-     "RQ1", "Open", "Investigate Phase 3 Week 7"),
+     "RQ1", "Open", "Investigate Phase 3"),
 
     ("O11", "Backblaze HGST Anomaly", "Backblaze", "The HGST HMS5C4040BLE640 shows consistently weak SMART discrimination. Genuine failure-mechanism difference or statistical artifact of 0.0011% daily failure rate? Exclude or treat as edge case?",
      "Affects training-set composition and per-model evaluation", "Notebook 05 Sec 7.7 #7",
-     "RQ1", "Open", "Investigate Phase 4 Week 8"),
+     "RQ1", "Open", "Investigate Phase 4"),
 ]
 
 COLUMNS = [
@@ -543,21 +543,21 @@ print(f"File size: {DECISIONS_CSV.stat().st_size:,} bytes")
 #
 # **Open in Google EDA (from notebook 03 Section 7.7; 3 of original 7 already
 # resolved by follow-up queries):**
-# 1. O01: Diurnal and weekly temporal patterns in event density (Phase 3 Week 3).
+# 1. O01: Diurnal and weekly temporal patterns in event density (Phase 3).
 # 2. O02: Monitoring-tier evictions (6.7% of all EVICTs); canary processes or
-#    genuine infrastructure issues? (Phase 3 Week 2 or Phase 5 Week 10 sensitivity)
+#    genuine infrastructure issues? (Phase 3 or Phase 5 sensitivity)
 # 3. O03: Collection-level failure concentration; is collection_type informative?
-#    (Phase 4 Week 5 during RQ2 conflict labeling)
-# 4. O04: Sentinel timestamp handling; censored or excluded? (Phase 3 Week 2)
+#    (Phase 4 during RQ2 conflict labeling)
+# 4. O04: Sentinel timestamp handling; censored or excluded? (Phase 3)
 #
 # **Open in Backblaze EDA (from notebook 05 Section 7.7; all 7 still open):**
-# 5. O05: Non-zero indicator features vs upper-quantile rolling stats (Phase 3 Week 7)
-# 6. O06: Optimal sliding-window length 7/14/30/60 days (Phase 3 Week 7 + Phase 4 Week 8)
-# 7. O07: Model stratification depth: model vs manufacturer vs global+identity (Phase 4 Week 8)
-# 8. O08: SMART 187/188 recovery via post-2015 restriction (Phase 3 Week 7 + Phase 4 Week 8)
-# 9. O09: Survival modeling for RQ3 Backblaze (Phase 4 Week 8)
-# 10. O10: Seasonal features given 46% relative variation (Phase 3 Week 7)
-# 11. O11: HGST anomaly handling (Phase 4 Week 8)
+# 5. O05: Non-zero indicator features vs upper-quantile rolling stats (Phase 3)
+# 6. O06: Optimal sliding-window length 7/14/30/60 days (Phase 3 + Phase 4)
+# 7. O07: Model stratification depth: model vs manufacturer vs global+identity (Phase 4)
+# 8. O08: SMART 187/188 recovery via post-2015 restriction (Phase 3 + Phase 4)
+# 9. O09: Survival modeling for RQ3 Backblaze (Phase 4)
+# 10. O10: Seasonal features given 46% relative variation (Phase 3)
+# 11. O11: HGST anomaly handling (Phase 4)
 #
 # When any of these gets resolved, append a new Validated entry to the CSV
 # referencing the resolution; do not amend the Open entry (the audit trail
