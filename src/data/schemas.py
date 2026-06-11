@@ -209,6 +209,8 @@ INSTANCE_LIFECYCLE_SUMMARY_SCHEMA: dict[str, pl.DataType] = {
     "terminal_priority": pl.Int64,
     "terminal_scheduling_class": pl.Int64,
     "terminal_machine_id": pl.Int64,
+    "submit_priority": pl.Int64,
+    "submit_scheduling_class": pl.Int64,
     "cpu_request": pl.Float64,
     "memory_request": pl.Float64,
     "resubmission_count": pl.Int64,
