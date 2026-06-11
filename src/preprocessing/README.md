@@ -47,7 +47,7 @@ Three-step BigQuery-side reconstruction:
 2. **Verify**: counts the materialized rows and raises `ValueError` if outside `expected_row_count_range`. The default `(60M, 100M)` brackets the F4-confirmed ~74.5M unique-instance count with slack.
 3. **Export and return**: `EXPORT DATA` writes partitioned Parquet to `gs://{bucket}/{prefix}/*.parquet`, then returns `pl.scan_parquet(prefix)` so callers receive a lazy scan rather than a 75M-row eager pull.
 
-The output schema exposes `submit_time` (microseconds since trace start), satisfying the V26 contract for the temporal-feature derivation in `src/features/temporal.py`.
+The output schema exposes `submit_time` (microseconds since trace start), satisfying the V26 contract for the temporal-feature derivation in `src/features/temporal.py`. It also exposes `submit_priority` and `submit_scheduling_class` (the priority and scheduling class at the instance's first event, `ARRAY_AGG(... ORDER BY time ASC LIMIT 1)`): these are the leak-free at-submission sources for the episode-grain `priority_tier` / `scheduling_class`, whereas the `terminal_*` counterparts (last event by time) are retained for outcome labeling only because the terminal value encodes the outcome (`V35`).
 
 Implements `V09` (rapid-onset failure model), `V10` (resubmission history dominates), and `V29` (V10 reproduction caveats and full-trace contrast). The window-function pattern follows `sql/exploration/instance_lifecycle_reconstruction.sql` Part B; the validated full-trace adaptation lives in `notebooks/08_google_preprocessing.py` Section 5.
 

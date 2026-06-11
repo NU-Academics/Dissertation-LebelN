@@ -2,7 +2,7 @@
 
 Jupytext percent-format `.py` files are the primary work product. Each notebook captures the analytical narrative for one CRISP-DM step and produces the artifacts that downstream notebooks and `src/` modules depend on. `.ipynb` files are generated on demand in Colab and are gitignored.
 
-The decisions audit trail at `outputs/tables/eda_decisions.csv` is the canonical cross-reference for every validated analytical choice (rows `V01` through `V29` at the time of writing). When a notebook section references a decision by ID, the CSV is where to read the evidence and the next step.
+The decisions audit trail at `outputs/tables/eda_decisions.csv` is the canonical cross-reference for every validated analytical choice (rows `V01` through `V33` at the time of writing, plus the `P` planned and `O` open rows). When a notebook section references a decision by ID, the CSV is where to read the evidence and the next step.
 
 ## Phase 2: Data Understanding (complete)
 
@@ -65,11 +65,11 @@ The Phase 3 Google preprocessing notebook. Seven analytical sections plus the ex
 
 ### `10_feature_engineering_google.py`
 
-The Google feature-engineering notebook. Sections 0-10 build the instance-grain three-tier matrix (`instance_features`) per the `V13` priority hierarchy: Tier 1 historical/scheduling/temporal, Tier 2 early-runtime slopes via a two-stage BigQuery filter, Tier 3 windowed utilization (ablation only). Sections 11-12 add the **per-attempt (scheduled-episode) redesign** that removes the instance-grain lifecycle-history leakage (`V30`-`V33`): Section 11 segments episodes and builds `episode_lifecycle_features_base` with strictly-prior history (leakage guard PASS; submission+history MCC 0.949 → 0.681); Section 12 adds episode Tier 2/3 by interval assignment and assembles the full `episode_features` matrix (89.68M episodes). Durable outputs are the BigQuery tables and GCS exports (no multi-GB Drive sink for the episode matrix). Logic extracted to `src/features/` (the five tier modules and `episodes.py`).
+The Google feature-engineering notebook. Section 1.1 locks the working set via the collection-level sampler (`src/features/sampling.py::build_working_set_sql`): it reads the per-instance `instance_lifecycle_summary` (never the 1.7B-row events table), retains every failure-containing collection in full, and stratified-samples successful collections. The eligible instance population is 35.1M, below the projected 50-100M band, so Section 1.1a asserts full-population retention rather than subsampling and writes the `SamplingManifest`. Sections 0-10 build the instance-grain three-tier matrix (`instance_features`) per the `V13` priority hierarchy: Tier 1 historical/scheduling/temporal, Tier 2 early-runtime slopes via a two-stage BigQuery filter, Tier 3 windowed utilization (ablation only). Sections 11-12 add the **per-attempt (scheduled-episode) redesign** that removes the instance-grain lifecycle-history leakage (`V30`-`V33`): Section 11 segments episodes and builds `episode_lifecycle_features_base` with strictly-prior history (leakage guard PASS; submission+history MCC 0.949 → 0.681), and Section 11.3 verifies the episode census (~89.68M rows) lands in the 50-100M `P01` band; Section 12 adds episode Tier 2/3 by interval assignment and assembles the full `episode_features` matrix. The episode matrix is built over all instances from `instance_events_labeled`, independent of the working set. Durable outputs are the BigQuery tables and GCS exports (no multi-GB Drive sink for the episode matrix). Logic extracted to `src/features/` (the five tier modules, `episodes.py`, and `sampling.py`).
 
 ### `11_preprocessed_eda_google.py`
 
-Validates the engineered matrix and decides working-set adequacy (`P05`). Sections 1-2 re-verify the distribution invariants and the `V12` Tier 3 inversion guard; Section 3 runs the LightGBM learning curve, the leakage diagnostics, and the prediction-point ablation (which surfaced the instance-grain leakage). Section 3.8 is the **episode-grain re-check**: a BigQuery-side capped, instance-keyed group-split extract from `episode_features` runs the honest prediction-point curve (submission 0.666 → early-runtime 0.909, meeting the RQ1 >0.90 target).
+Validates the engineered matrix and decides working-set adequacy (`P05`). Sections 1-2 re-verify the distribution invariants and the `V12` Tier 3 inversion guard; Section 3 runs the LightGBM learning curve, the leakage diagnostics, and the prediction-point ablation (which surfaced the instance-grain leakage). Section 3.8 is the **episode-grain re-check**: a BigQuery-side capped, instance-keyed group-split extract from `episode_features` runs the honest prediction-point curve (submission 0.666 → early-runtime 0.909, meeting the RQ1 >0.90 target). Section 3.9 is the **episode-grain learning curve** at the early-runtime prediction point: it is the RQ1 sample-size-adequacy evidence (`P05`), and Sections 4 (P05 decision) and 5 (figure) read from it. The instance-grain curve from Sections 3.1-3.7 is retained as a labeled leakage baseline (figure in Section 3.5b), because its ~0.97 MCC is leakage-inflated.
 
 ### `11b_attempt_structure_google.py`
 
@@ -79,9 +79,15 @@ Characterizes the attempt/episode structure of the event stream before the redes
 
 `09_backblaze_preprocessing.py` and `10_feature_engineering_backblaze.py` are the next preprocessing-and-feature notebooks.
 
-## Phase 4 onward (planned)
+## Phase 4: Modeling (started)
 
-Notebooks 12 through 19 cover modeling, online-learning drift simulation, hypothesis testing, ablation, and the Chapter 4 tables/figures regeneration pipeline. Each will get its own narrative-first treatment, with logic moving into `src/` only after the notebook validates it.
+### `12_rq1_ensemble_google.py`
+
+RQ1 ensemble failure prediction at the **episode grain** (the leakage-free grain from the per-attempt redesign). Loads the durable `episode_features` matrix, attaches `schedule_time` and a 1-based `sched_day`, applies the per-instance negative cap (`src/features/episodes.py::cap_negative_episodes`), and runs per-prediction-point (`at_submission`, `at_scheduling`, `early_runtime`) training across a model set (logistic regression, decision tree, random forest, balanced random forest, XGBoost, LightGBM, gradient boosting, plus a top-3 soft-voting stack) with walk-forward CV, a validation-tuned threshold, and percentile bootstrap CIs. The RQ1 >0.90 MCC target is tested at early-runtime. Writes `outputs/tables/rq1_google.csv`. A starting skeleton; thresholds, the SMOTE/NaN handling, and the model set are expected to be revised as runs return.
+
+### Remaining Phase 4 onward (planned)
+
+Notebooks 13 through 19 cover the remaining RQ models, online-learning drift simulation, hypothesis testing, ablation, and the Chapter 4 tables/figures regeneration pipeline. Each will get its own narrative-first treatment, with logic moving into `src/` only after the notebook validates it.
 
 ## Conventions
 
