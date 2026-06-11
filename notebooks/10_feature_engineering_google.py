@@ -1725,13 +1725,18 @@ record_episode_check(
 # Build one-hot and temporal SQL fragments from the enumerations defined in
 # Sections 2/4 so the episode columns line up with the instance columns.
 # Explicit, readable priority-tier band CASE -> one-hot (mirrors _priority_tier_expr).
+# Uses submit_priority (the value at the instance's FIRST event), NOT
+# terminal_priority. terminal_priority is the priority at the death event and
+# leaks the outcome at an at-submission prediction point (NB12 Sec 3.2-3.4: the
+# terminal-derived tiers near-deterministically encode failure, e.g. monitoring
+# tier 99.4% FAIL). submit_priority is the leak-free at-submission attribute.
 _priority_tier_case = f"""
     CASE
-        WHEN s.terminal_priority <= {PRIORITY_FREE_MAX} THEN 'free'
-        WHEN s.terminal_priority BETWEEN {PRIORITY_BEST_EFFORT_LOW} AND {PRIORITY_BEST_EFFORT_MAX} THEN 'best_effort'
-        WHEN s.terminal_priority BETWEEN {PRIORITY_MID_TIER_LOW} AND {PRIORITY_MID_TIER_MAX} THEN 'mid'
-        WHEN s.terminal_priority BETWEEN {PRIORITY_PRODUCTION_LOW} AND {PRIORITY_PRODUCTION_MAX} THEN 'production'
-        WHEN s.terminal_priority >= {PRIORITY_MONITORING_LOW} THEN 'monitoring'
+        WHEN s.submit_priority <= {PRIORITY_FREE_MAX} THEN 'free'
+        WHEN s.submit_priority BETWEEN {PRIORITY_BEST_EFFORT_LOW} AND {PRIORITY_BEST_EFFORT_MAX} THEN 'best_effort'
+        WHEN s.submit_priority BETWEEN {PRIORITY_MID_TIER_LOW} AND {PRIORITY_MID_TIER_MAX} THEN 'mid'
+        WHEN s.submit_priority BETWEEN {PRIORITY_PRODUCTION_LOW} AND {PRIORITY_PRODUCTION_MAX} THEN 'production'
+        WHEN s.submit_priority >= {PRIORITY_MONITORING_LOW} THEN 'monitoring'
         ELSE 'unknown'
     END
 """
@@ -1784,7 +1789,7 @@ SELECT
     s.cpu_request,
     s.memory_request,
     SAFE_DIVIDE(s.cpu_request, NULLIF(s.memory_request, 0)) AS request_ratio,
-    CAST(s.terminal_scheduling_class AS INT64) AS scheduling_class,
+    CAST(s.submit_scheduling_class AS INT64) AS scheduling_class,  -- submit-time, not terminal (leak-free)
     SAFE_DIVIDE(h.schedule_time - h.attempt_submit_time, {MICROS_PER_SEC}) AS queue_time,
     COALESCE(hc.has_hardware_counters_majority, 0) AS has_hardware_counters,
     {_priority_onehot_sql},
