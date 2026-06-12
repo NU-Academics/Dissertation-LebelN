@@ -389,7 +389,7 @@ DECISIONS = [
 
     ("P05", "Sample-Size Adequacy", "Both", "Learning curve at 1/5/10/25/50/100% of working set; convergence when MCC delta < 0.005 with 95% CI straddling zero",
      "Procedure committed in DP", "DP Ch. 3 Sampling Strategy",
-     "RQ1, RQ2, RQ3, RQ4, RQ5", "Planned (DP)", "Executed Phase 3 Weeks 3 and 7"),
+     "RQ1, RQ2, RQ3, RQ4, RQ5", "Planned (DP)", "Executed Phase 3"),
 
     ("P06", "Prediction Architecture", "Google", "Three-level prediction (at-submission primary, at-scheduling secondary, early-runtime sensitivity)",
      "Motivated by V09 rapid-onset model; runtime windows infeasible at the dominant failure mode", "DP Ch. 3 RQ1 specification",
@@ -401,7 +401,7 @@ DECISIONS = [
 
     ("P08", "Hyperparameter Tuning Strategy", "Both", "Bayesian optimization for LightGBM and XGBoost (50 trials per family); grid search for Random Forest",
      "Efficient for high-dimensional parameter spaces", "DP Ch. 3 Hyperparameter Tuning Strategy; Snoek et al. (2012)",
-     "RQ1, RQ4", "Planned (DP)", "Executed Phase 4 Weeks 4 and 8"),
+     "RQ1, RQ4", "Planned (DP)", "Executed Phase 4"),
 
     ("P09", "RQ2 Conflict Types", "Google", "Three conflict types labeled: resource contention, priority inversion, scheduling violations",
      "Operational definitions from DP", "DP Ch. 3 RQ2 specification",
