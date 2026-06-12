@@ -1,10 +1,10 @@
 # `src/models/` — Ensemble Training and Online Learners
 
-**Status:** Planned for Phase 4 and Phase 7. Modules are extracted after the per-RQ notebooks validate the training logic against the methodology committed in Dissertation Proposal Chapter 3.
+**Status:** `ensemble.py` populated (extracted from the RQ1 modeling notebook and unit-tested). `classifier.py` and `online.py` remain planned for the RQ2 and RQ5 notebooks. Modules are extracted after the per-RQ notebooks validate the training logic against the methodology committed in Dissertation Proposal Chapter 3.
 
-## Planned modules
+## Modules
 
-- `ensemble.py` — Ensemble training and prediction harness for RQ1 (failure prediction). Wraps scikit-learn, XGBoost, and LightGBM through a single interface with walk-forward cross-validation (Cerqueira et al., 2020), Bayesian hyperparameter tuning (50 trials per family), and cost-sensitive learning. Extracts from `notebooks/12_rq1_ensemble_google.py` once the three-level prediction architecture (`P06`) is validated.
+- `ensemble.py`, populated — Reusable wrappers for the RQ1 tree-ensemble learners: `RandomForestWrapper`, `BalancedRandomForestWrapper`, `XGBoostWrapper`, `LightGBMWrapper`, `GradientBoostingWrapper`, and a `SoftVotingStack`, all satisfying one `EnsembleWrapper` protocol (`fit` / `predict_proba` / `feature_importances` / `save` / `load`). They accept Polars DataFrames at the boundary (converting to a dense `float32` array once per call), set cost-sensitive class weighting to the inverse class prior where the learner supports it (XGBoost via `scale_pos_weight` computed at fit; Gradient Boosting via balanced `sample_weight`), and leave SMOTE and the per-instance negative cap to the caller as training-only fold steps. `predict_proba` returns the 1-D positive-class probability. `build_wrapper(name, **params)` is the factory used by the modeling notebook and the hyperparameter search. Extracted from `notebooks/12_rq1_ensemble_google.py` (the three-level prediction architecture, `P06`); tested in `tests/test_ensemble.py`. Walk-forward cross-validation and Bayesian tuning (50 trials per family) are orchestrated by the notebook around these wrappers.
 - `classifier.py` — Single-model classifiers for RQ2 (conflict resolution). Decision tree, SVM, random forest, and shallow neural network variants. Targets the >80% conflict-resolution success rate (`P09`).
 - `online.py` — Online learners for RQ5 (concept drift). River-based Adaptive Random Forest, Hoeffding Adaptive Tree, and Online Gradient Boosting (`P13`). Paired with the drift detectors specified in `P12` (ADWIN, Page-Hinkley, KS, PSI).
 
