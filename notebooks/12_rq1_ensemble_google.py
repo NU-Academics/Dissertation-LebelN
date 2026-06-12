@@ -57,7 +57,7 @@
 # ## 0. Colab session setup
 
 # %%
-# !pip install -q polars lightgbm xgboost scikit-learn imbalanced-learn pandas pyarrow google-cloud-bigquery-storage
+# !pip install -q polars lightgbm xgboost scikit-learn imbalanced-learn pandas pyarrow google-cloud-bigquery-storage optuna pyyaml matplotlib
 
 # %%
 import os
@@ -267,10 +267,35 @@ def _pull_split(split: str) -> pl.DataFrame:
     return df
 
 
-print("Pulling instance-grouped train / val / test splits from BigQuery (Arrow stream) ...")
-train_df = _pull_split("train")
-val_df = _pull_split("val")
-test_df = _pull_split("test")
+CACHE_DIR = OUTPUT_DIR / "cache"
+CACHE_DIR.mkdir(parents=True, exist_ok=True)
+USE_SPLIT_CACHE = True   # reload splits from the Drive Parquet cache if present; set False to force a fresh BigQuery pull
+
+
+def _load_split(split: str) -> pl.DataFrame:
+    """Pull a split from BigQuery, caching the result to Parquet on Drive so a
+    later Colab session reloads it and skips the (slow) BigQuery pull.
+
+    Cache invalidation: the cached Parquet reflects the extraction at write time.
+    After the upstream ``episode_features`` table is rebuilt, or any extraction
+    constant changes (split buckets, permille, the per-instance negative cap),
+    set ``USE_SPLIT_CACHE = False`` once to refresh, or delete the files in
+    ``CACHE_DIR``."""
+    cache_path = CACHE_DIR / f"rq1_google_split_{split}.parquet"
+    if USE_SPLIT_CACHE and cache_path.exists():
+        df = pl.read_parquet(cache_path)
+        print(f"  {split:5s} loaded from cache  ({df.height:>9,} rows) <- {cache_path.name}")
+        return df
+    df = _pull_split(split)
+    df.write_parquet(cache_path)
+    print(f"  {split:5s} pulled from BigQuery ({df.height:>9,} rows), cached -> {cache_path.name}")
+    return df
+
+
+print("Loading instance-grouped train / val / test splits (Drive cache, else BigQuery Arrow stream) ...")
+train_df = _load_split("train")
+val_df = _load_split("val")
+test_df = _load_split("test")
 for _name, _df in (("train (capped)", train_df), ("val (natural)", val_df),
                    ("test (natural)", test_df)):
     _p = int(_df.filter(pl.col(LABEL_COL) == 1).height)
@@ -577,7 +602,7 @@ def fit_select_score(model_name: str, cols: list[str]) -> dict:
     del est, x_tr, x_val, x_te
     gc.collect()
     return {"model": model_name, "cv": cv, "val_mcc": val_mcc,
-            "threshold": thr, "metrics": metrics, "cis": cis}
+            "threshold": thr, "metrics": metrics, "cis": cis, "test_prob": test_prob}
 
 
 def soft_voting_stack(top_models: list[str], cols: list[str]) -> dict:
@@ -605,34 +630,59 @@ def soft_voting_stack(top_models: list[str], cols: list[str]) -> dict:
     del x_tr, x_val, x_te
     gc.collect()
     return {"model": f"soft_voting_top3[{'+'.join(top_models)}]", "cv": {},
-            "val_mcc": val_mcc, "threshold": thr, "metrics": metrics, "cis": cis}
+            "val_mcc": val_mcc, "threshold": thr, "metrics": metrics, "cis": cis,
+            "test_prob": test_prob}
 
 
-records: list[dict] = []
-for pp_name, pp_cols in PREDICTION_POINTS.items():
-    print(f"\n=== Prediction point: {pp_name} ({len(pp_cols)} features) ===")
-    pp_results = []
-    for model_name in MODEL_NAMES:
-        res = fit_select_score(model_name, pp_cols)
-        pp_results.append(res)
-        print(f"  {res['model']:24s} val_MCC={res['val_mcc']:.4f}  "
-              f"test_MCC={res['metrics']['mcc']:.4f}  "
-              f"F1={res['metrics']['f1']:.4f}  PR-AUC={res['metrics']['pr_auc']:.4f}")
+# %% [markdown]
+# **Session economy.** The zoo fit below is the multi-hour step. On completion it
+# pickles the assembled `records` to Drive; set `RUN_MODEL_ZOO = False` on a later
+# session to reload them and run Sections 9-10 (which consume `records`) without
+# refitting. Re-run the zoo (`RUN_MODEL_ZOO = True`) after any change to the
+# splits, feature masks, or estimators. Section 1 must still run either way, since
+# the decomposition cells and the Section 9 checkpoint refit use the loaded splits.
 
-    # Soft-voting stack of the top three by validation MCC (exclude the dummy).
-    ranked = sorted(
-        (r for r in pp_results if r["model"] != "most_frequent"),
-        key=lambda r: r["val_mcc"], reverse=True,
-    )
-    top3 = [r["model"] for r in ranked[:3]]
-    stack = soft_voting_stack(top3, pp_cols)
-    pp_results.append(stack)
-    print(f"  {stack['model']:24s} val_MCC={stack['val_mcc']:.4f}  "
-          f"test_MCC={stack['metrics']['mcc']:.4f}  "
-          f"F1={stack['metrics']['f1']:.4f}  PR-AUC={stack['metrics']['pr_auc']:.4f}")
+# %%
+import pickle
 
-    for r in pp_results:
-        records.append({"prediction_point": pp_name, **r})
+RUN_MODEL_ZOO = True   # set False to skip the multi-hour zoo fit and reload records from the Drive cache
+RECORDS_CACHE = CACHE_DIR / "rq1_google_records.pkl"
+
+if RUN_MODEL_ZOO:
+    records: list[dict] = []
+    for pp_name, pp_cols in PREDICTION_POINTS.items():
+        print(f"\n=== Prediction point: {pp_name} ({len(pp_cols)} features) ===")
+        pp_results = []
+        for model_name in MODEL_NAMES:
+            res = fit_select_score(model_name, pp_cols)
+            pp_results.append(res)
+            print(f"  {res['model']:24s} val_MCC={res['val_mcc']:.4f}  "
+                  f"test_MCC={res['metrics']['mcc']:.4f}  "
+                  f"F1={res['metrics']['f1']:.4f}  PR-AUC={res['metrics']['pr_auc']:.4f}")
+
+        # Soft-voting stack of the top three by validation MCC (exclude the dummy).
+        ranked = sorted(
+            (r for r in pp_results if r["model"] != "most_frequent"),
+            key=lambda r: r["val_mcc"], reverse=True,
+        )
+        top3 = [r["model"] for r in ranked[:3]]
+        stack = soft_voting_stack(top3, pp_cols)
+        pp_results.append(stack)
+        print(f"  {stack['model']:24s} val_MCC={stack['val_mcc']:.4f}  "
+              f"test_MCC={stack['metrics']['mcc']:.4f}  "
+              f"F1={stack['metrics']['f1']:.4f}  PR-AUC={stack['metrics']['pr_auc']:.4f}")
+
+        for r in pp_results:
+            records.append({"prediction_point": pp_name, **r})
+
+    with open(RECORDS_CACHE, "wb") as _fh:
+        pickle.dump(records, _fh)
+    print(f"\nModel-zoo records cached ({len(records)} rows) -> {RECORDS_CACHE.name}")
+else:
+    with open(RECORDS_CACHE, "rb") as _fh:
+        records = pickle.load(_fh)
+    print(f"Loaded {len(records)} model-zoo records from cache -> {RECORDS_CACHE.name} "
+          "(RUN_MODEL_ZOO=False; Sections 9-10 will use these)")
 
 # %% [markdown]
 # ### 6.5 Submission history decomposition
@@ -768,3 +818,418 @@ if _er.height:
 
 # %%
 print(rq1_df.head(24))
+
+# %% [markdown]
+# ## 8. Hyperparameter tuning (Optuna + walk-forward CV)
+#
+# Bayesian optimization (Optuna) for LightGBM and XGBoost, and a shared
+# walk-forward grid for Random Forest and Balanced Random Forest, each scored by
+# the mean walk-forward-CV MCC at the RQ1 headline (early-runtime) point using the
+# same per-fold impute + SMOTE + threshold-tuning pipeline as Section 6. Balanced
+# Random Forest is tuned because RQ1 is an imbalance problem and it attacks that
+# directly; the three baselines (logistic regression, decision tree, dummy) and
+# sklearn Gradient Boosting (dominated by LightGBM / XGBoost) are left untuned.
+# Best params are written to `configs/models/rq1_google_{lgbm,xgb,rf,brf}_{point}.yaml`.
+# The filename is point-aware, so tuning a second point (set `TUNE_POINT`) never
+# clobbers the first: run once at `early_runtime` (the RQ1 headline) and once at
+# `at_submission` to give that checkpoint, which feeds RQ3 / RQ4, its own tuned
+# config. The Optuna studies persist to a SQLite database on Drive and are topped
+# up to `N_TRIALS` (not re-run from scratch), so re-running a tuned point only
+# rewrites its config rather than burning another `N_TRIALS` of search.
+#
+# This is the heavy step of the week. Set `RUN_TUNING = False` to skip it and
+# reuse the saved configs (the Section 9 checkpoint reads them when present).
+
+# %%
+import json
+import time
+
+import optuna
+import yaml
+
+CONFIG_DIR = Path(REPO_DIR) / "configs" / "models"   # repo working copy; commit the YAMLs after
+CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+OPTUNA_DIR = OUTPUT_DIR / "optuna"
+OPTUNA_DIR.mkdir(parents=True, exist_ok=True)
+
+N_TRIALS = 50                       # per Bayesian family
+TUNE_POINT = "early_runtime"        # the RQ1 headline; set "at_submission" to retune that point
+TUNE_COLS = PREDICTION_POINTS[TUNE_POINT]
+RUN_TUNING = True                   # set False to reuse existing configs/models/*.yaml
+optuna.logging.set_verbosity(optuna.logging.WARNING)
+
+# Tunable family -> sklearn-native estimator param names.
+_TUNABLE = {"lightgbm", "xgboost", "random_forest", "balanced_random_forest"}
+
+
+def _tuned_pipeline(family: str, params: dict, y_train: np.ndarray):
+    """Build the impute + SMOTE + classifier pipeline for a tunable family with
+    explicit hyperparameters (the inverse-prior weighting is kept fixed)."""
+    n_pos_ = int(y_train.sum())
+    spw = (y_train.size - n_pos_) / max(n_pos_, 1)
+    if family == "lightgbm":
+        clf = lgb.LGBMClassifier(class_weight="balanced", subsample_freq=1, n_jobs=-1,
+                                 random_state=RANDOM_SEED, verbosity=-1, **params)
+    elif family == "xgboost":
+        clf = xgb.XGBClassifier(scale_pos_weight=spw, eval_metric="aucpr", tree_method="hist",
+                                n_jobs=-1, random_state=RANDOM_SEED, **params)
+    elif family == "random_forest":
+        clf = RandomForestClassifier(class_weight="balanced", n_jobs=-1,
+                                     random_state=RANDOM_SEED, **params)
+    elif family == "balanced_random_forest":
+        clf = BalancedRandomForestClassifier(sampling_strategy="all", replacement=True,
+                                             n_jobs=-1, random_state=RANDOM_SEED, **params)
+    else:
+        raise ValueError(f"Not a tunable family: {family}")
+    return ImbPipeline([
+        ("impute", SimpleImputer(strategy="median", add_indicator=True)),
+        ("smote", SMOTE(random_state=RANDOM_SEED)),
+        ("model", clf),
+    ])
+
+
+def _cv_mcc(params: dict, family: str, cols: list[str]) -> float:
+    """Mean walk-forward-CV MCC for one parameter set (NaN if no usable fold)."""
+    fold_mccs: list[float] = []
+    for tr_max, te_lo, te_hi in WALK_FORWARD_FOLDS:
+        tr = train_df.filter(pl.col("sched_day") <= tr_max)
+        te = train_df.filter((pl.col("sched_day") >= te_lo) & (pl.col("sched_day") <= te_hi))
+        if te.height == 0 or tr.filter(pl.col(LABEL_COL) == 1).height == 0:
+            continue
+        x_tr, y_tr = make_xy(tr, cols)
+        x_te, y_te = make_xy(te, cols)
+        est = _tuned_pipeline(family, params, y_tr)
+        est.fit(x_tr, y_tr)
+        prob = predict_proba(est, x_te)
+        thr = best_threshold(y_te, prob)
+        fold_mccs.append(float(matthews_corrcoef(y_te, (prob >= thr).astype(np.int8))))
+        del est, x_tr, x_te
+        gc.collect()
+    return float(np.mean(fold_mccs)) if fold_mccs else float("nan")
+
+
+def _lgbm_objective(trial: optuna.Trial) -> float:
+    params = dict(
+        n_estimators=trial.suggest_int("n_estimators", 200, 2000),
+        num_leaves=trial.suggest_int("num_leaves", 31, 511),
+        learning_rate=trial.suggest_float("learning_rate", 0.01, 0.3, log=True),
+        colsample_bytree=trial.suggest_float("colsample_bytree", 0.5, 1.0),   # feature_fraction
+        subsample=trial.suggest_float("subsample", 0.5, 1.0),                 # bagging_fraction
+        min_child_samples=trial.suggest_int("min_child_samples", 100, 10000, log=True),  # min_data_in_leaf
+    )
+    return _cv_mcc(params, "lightgbm", TUNE_COLS)
+
+
+def _xgb_objective(trial: optuna.Trial) -> float:
+    params = dict(
+        n_estimators=trial.suggest_int("n_estimators", 200, 2000),
+        max_depth=trial.suggest_int("max_depth", 3, 12),
+        learning_rate=trial.suggest_float("learning_rate", 0.01, 0.3, log=True),
+        subsample=trial.suggest_float("subsample", 0.5, 1.0),
+        colsample_bytree=trial.suggest_float("colsample_bytree", 0.5, 1.0),
+        min_child_weight=trial.suggest_int("min_child_weight", 1, 100, log=True),
+    )
+    return _cv_mcc(params, "xgboost", TUNE_COLS)
+
+
+def _run_optuna(name: str, objective) -> optuna.Study:
+    """Resume (or create) the per-family study for the current TUNE_POINT and top it
+    up to N_TRIALS completed trials. Topping up rather than always adding N_TRIALS
+    makes a re-run idempotent: re-running a point that already has N_TRIALS done
+    just rewrites the config (e.g. under a new point-aware name) without burning
+    another N_TRIALS of search; a fresh point still gets the full N_TRIALS."""
+    study = optuna.create_study(
+        study_name=f"rq1_google_{name}_{TUNE_POINT}",
+        direction="maximize",
+        storage=f"sqlite:///{OPTUNA_DIR / f'rq1_google_{name}.db'}",
+        load_if_exists=True,
+    )
+    done = sum(t.state == optuna.trial.TrialState.COMPLETE for t in study.trials)
+    remaining = max(N_TRIALS - done, 0)
+    if remaining:
+        study.optimize(objective, n_trials=remaining, gc_after_trial=True)
+    else:
+        print(f"  {name}: {done} trials already complete for {TUNE_POINT}; reusing best.")
+    return study
+
+
+def _forest_walkforward_grid(family: str) -> tuple[dict, float]:
+    """Walk-forward-CV grid shared by the random-forest families (n_estimators,
+    max_depth, min_samples_leaf), used for both `random_forest` and
+    `balanced_random_forest`. Widened past the original corner (the first pass
+    pinned both families at n_estimators 800 / max_depth 35 / min_samples_leaf 20,
+    i.e. the edge of the old grid) so the search brackets the optimum on every
+    axis: more trees, deeper including no cap, and a smaller leaf floor."""
+    grid = [
+        {"n_estimators": ne, "max_depth": md, "min_samples_leaf": ml}
+        for ne in (800, 1200)
+        for md in (35, 50, None)
+        for ml in (5, 20)
+    ]
+    best, best_mcc = {}, -1.0
+    for params in grid:
+        m = _cv_mcc(params, family, TUNE_COLS)
+        print(f"  {family} {params} -> CV MCC {m:.4f}")
+        if m > best_mcc:
+            best_mcc, best = m, params
+    return best, best_mcc
+
+
+def _write_config(name: str, params: dict, cv_mcc: float) -> Path:
+    """Write the tuned config, keyed by family AND prediction point so tuning a
+    second point never clobbers the first (`rq1_google_{family}_{point}.yaml`)."""
+    payload = {"model": name, "prediction_point": TUNE_POINT, "random_state": RANDOM_SEED,
+               "cv_mcc_mean": float(cv_mcc), "params": params}
+    path = CONFIG_DIR / f"rq1_google_{name}_{TUNE_POINT}.yaml"
+    with open(path, "w") as fh:
+        yaml.safe_dump(payload, fh, sort_keys=False)
+    print(f"  wrote {path.name} (CV MCC {cv_mcc:.4f})")
+    return path
+
+
+if RUN_TUNING:
+    print(f"Tuning at the {TUNE_POINT} point, {N_TRIALS} trials per Bayesian family ...")
+    _t0 = time.perf_counter()
+    _lgbm_study = _run_optuna("lgbm", _lgbm_objective)
+    _write_config("lgbm", _lgbm_study.best_params, _lgbm_study.best_value)
+    _xgb_study = _run_optuna("xgb", _xgb_objective)
+    _write_config("xgb", _xgb_study.best_params, _xgb_study.best_value)
+    _rf_best, _rf_mcc = _forest_walkforward_grid("random_forest")
+    _write_config("rf", _rf_best, _rf_mcc)
+    _brf_best, _brf_mcc = _forest_walkforward_grid("balanced_random_forest")
+    _write_config("brf", _brf_best, _brf_mcc)
+    print(f"Tuning complete in {(time.perf_counter() - _t0) / 60:.1f} min; "
+          f"configs in {CONFIG_DIR}, studies in {OPTUNA_DIR}.")
+else:
+    print("RUN_TUNING is False; Section 9 will reuse existing configs/models/*.yaml if present.")
+
+# %% [markdown]
+# ## 9. Checkpoint the best ensembles
+#
+# Persist the deployable model at the two points the downstream work consumes: the
+# best at-submission ensemble (the input to RQ4 admission control) and the best
+# early-runtime ensemble (the RQ1 headline). For each point the best single
+# ensemble learner by validation MCC is refit on the full training split (with its
+# tuned config from Section 8 if present, else the Section 6 defaults), then saved
+# with a metadata sidecar (library versions, a content hash of the training data,
+# fit timing, the decision threshold, and the validation/test metrics) so the
+# checkpoint is reproducible and auditable.
+
+# %%
+import hashlib
+import pickle
+from importlib import metadata as _ilmd
+
+from utils.colab_setup import CHECKPOINT_DIR
+
+CHECKPOINT_DIR.mkdir(parents=True, exist_ok=True)
+_FAMILY_CONFIG = {"lightgbm": "lgbm", "xgboost": "xgb", "random_forest": "rf",
+                  "balanced_random_forest": "brf"}
+
+
+def _data_sha(df: pl.DataFrame) -> str:
+    """Order-invariant content hash of a frame (sorted per-row hashes)."""
+    row_hashes = np.sort(df.hash_rows().to_numpy())
+    return hashlib.sha256(row_hashes.tobytes()).hexdigest()
+
+
+def _library_versions() -> dict:
+    out = {}
+    for pkg in ("scikit-learn", "xgboost", "lightgbm", "imbalanced-learn",
+                "polars", "numpy", "optuna"):
+        try:
+            out[pkg] = _ilmd.version(pkg)
+        except _ilmd.PackageNotFoundError:
+            out[pkg] = None
+    return out
+
+
+def _load_tuned_params(model_name: str, prediction_point: str) -> dict | None:
+    """Load the tuned params for a family at a specific prediction point. Configs
+    are point-aware (`rq1_google_{family}_{point}.yaml`), so the at-submission
+    checkpoint never picks up early-runtime params or vice versa; falls back to
+    None (Section 6 defaults) when the point has not been tuned."""
+    key = _FAMILY_CONFIG.get(model_name)
+    if key is None:
+        return None
+    path = CONFIG_DIR / f"rq1_google_{key}_{prediction_point}.yaml"
+    if not path.exists():
+        return None
+    with open(path) as fh:
+        return yaml.safe_load(fh).get("params")
+
+
+def _best_single(prediction_point: str) -> str:
+    """Name of the best single ensemble learner (excludes the dummy and the
+    soft-voting stack) at a prediction point, by validation MCC."""
+    candidates = [
+        r for r in records
+        if r["prediction_point"] == prediction_point
+        and not r["model"].startswith("soft_voting")
+        and r["model"] != "most_frequent"
+    ]
+    return max(candidates, key=lambda r: r["val_mcc"])["model"]
+
+
+def checkpoint_best(prediction_point: str, filename: str) -> dict:
+    cols = PREDICTION_POINTS[prediction_point]
+    model_name = _best_single(prediction_point)
+    tuned = _load_tuned_params(model_name, prediction_point)
+
+    x_tr, y_tr = make_xy(train_df, cols)
+    x_val, y_val = make_xy(val_df, cols)
+    x_te, y_te = make_xy(test_df, cols)
+
+    if tuned is not None:
+        est = _tuned_pipeline(model_name, tuned, y_tr)
+        tuned_flag = True
+    else:
+        est = build_estimator(model_name, y_tr)
+        tuned_flag = False
+
+    _t0 = time.perf_counter()
+    est.fit(x_tr, y_tr)
+    fit_seconds = time.perf_counter() - _t0
+
+    thr = best_threshold(y_val, predict_proba(est, x_val))
+    val_mcc = float(matthews_corrcoef(y_val, (predict_proba(est, x_val) >= thr).astype(np.int8)))
+    test_metrics = compute_metrics(y_te, predict_proba(est, x_te), thr)
+
+    model_path = CHECKPOINT_DIR / f"{filename}.pkl"
+    with open(model_path, "wb") as fh:
+        pickle.dump(est, fh, protocol=pickle.HIGHEST_PROTOCOL)
+
+    sidecar = {
+        "artifact": filename,
+        "model": model_name,
+        "prediction_point": prediction_point,
+        "tuned": tuned_flag,
+        "tuned_params": tuned,
+        "threshold": float(thr),
+        "feature_columns": cols,
+        "n_train_rows": int(train_df.height),
+        "random_seed": RANDOM_SEED,
+        "train_data_sha256": _data_sha(train_df.select(cols + [LABEL_COL])),
+        "val_mcc": val_mcc,
+        "test_metrics": test_metrics,
+        "fit_seconds": round(fit_seconds, 2),
+        "library_versions": _library_versions(),
+        "created_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+        "note": "Fitted imblearn pipeline (impute + SMOTE-at-fit + classifier); "
+                "SMOTE is a no-op at predict, so predict_proba reproduces deployment.",
+    }
+    with open(CHECKPOINT_DIR / f"{filename}.json", "w") as fh:
+        json.dump(sidecar, fh, indent=2)
+
+    print(f"Checkpointed {model_name} ({prediction_point}) -> {model_path}")
+    print(f"  threshold {thr:.4f} | test MCC {test_metrics['mcc']:.4f} | "
+          f"tuned={tuned_flag} | train SHA {sidecar['train_data_sha256'][:12]}...")
+    del x_tr, x_val, x_te
+    gc.collect()
+    return sidecar
+
+
+_ckpt_atsub = checkpoint_best("at_submission", "rq1_google_best_atsubmission")
+_ckpt_early = checkpoint_best("early_runtime", "rq1_google_best_earlyruntime")
+
+# %% [markdown]
+# ## 10. Artifacts: curves, calibration, confusion, and the hypothesis test
+#
+# PR / ROC curves for the model zoo at the early-runtime point, a reliability plot
+# and confusion matrices for the best model at each point, and the one-sample
+# hypothesis test of the best-ensemble MCC against the 0.90 RQ1 target. The test
+# uses the canonical stratified-bootstrap CI (`src/evaluation/metrics.py`) and the
+# CI-based one-sided decision rule (`src/evaluation/hypothesis.py`).
+
+# %%
+import matplotlib
+
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+from sklearn.metrics import confusion_matrix, precision_recall_curve, roc_curve
+
+from src.evaluation.hypothesis import one_sample_threshold_test
+from src.evaluation.metrics import calibration_table, mcc_with_ci
+
+FIG_DIR = FIGURES_DIR / "rq1_google"
+FIG_DIR.mkdir(parents=True, exist_ok=True)
+y_test = test_df[LABEL_COL].to_numpy().astype(np.int8)
+
+
+def _records_for(point: str) -> list[dict]:
+    return [r for r in records if r["prediction_point"] == point and r["model"] != "most_frequent"]
+
+
+def _best_record(point: str) -> dict:
+    return max(_records_for(point), key=lambda r: r["val_mcc"])
+
+
+# --- PR and ROC curves at the early-runtime point ---
+for kind, curve_fn, fname, xlab, ylab in (
+    ("PR", precision_recall_curve, "pr_curves.png", "Recall", "Precision"),
+    ("ROC", roc_curve, "roc_curves.png", "False positive rate", "True positive rate"),
+):
+    fig, ax = plt.subplots(figsize=(6.5, 5.5))
+    for r in sorted(_records_for("early_runtime"), key=lambda r: r["val_mcc"], reverse=True):
+        if kind == "PR":
+            precision, recall, _ = curve_fn(y_test, r["test_prob"])
+            ax.plot(recall, precision, label=f"{r['model']} (AP={r['metrics']['pr_auc']:.3f})")
+        else:
+            fpr, tpr, _ = curve_fn(y_test, r["test_prob"])
+            ax.plot(fpr, tpr, label=r["model"])
+    ax.set_xlabel(xlab); ax.set_ylabel(ylab)
+    ax.set_title(f"{kind} curves - early-runtime (RQ1)")
+    ax.legend(fontsize=7, loc="lower left")
+    fig.tight_layout(); fig.savefig(FIG_DIR / fname, dpi=150); plt.close(fig)
+    print(f"Wrote {FIG_DIR / fname}")
+
+# --- Reliability (calibration) plot for the best early-runtime model ---
+_best_er = _best_record("early_runtime")
+_cal = calibration_table(y_test, _best_er["test_prob"], n_bins=10).filter(pl.col("n") > 0)
+fig, ax = plt.subplots(figsize=(5.5, 5.5))
+ax.plot([0, 1], [0, 1], "--", color="grey", label="perfect calibration")
+ax.plot(_cal["mean_predicted"], _cal["observed_rate"], "o-", label=_best_er["model"])
+ax.set_xlabel("Mean predicted probability"); ax.set_ylabel("Observed failure rate")
+ax.set_title("Reliability - best early-runtime model"); ax.legend(fontsize=8)
+fig.tight_layout(); fig.savefig(FIG_DIR / "calibration.png", dpi=150); plt.close(fig)
+print(f"Wrote {FIG_DIR / 'calibration.png'}")
+
+# --- Confusion matrices for the best model at each prediction point ---
+points = list(PREDICTION_POINTS)
+fig, axes = plt.subplots(1, len(points), figsize=(4.2 * len(points), 4))
+for ax, point in zip(np.atleast_1d(axes), points):
+    rec = _best_record(point)
+    pred = (rec["test_prob"] >= rec["threshold"]).astype(np.int8)
+    cm = confusion_matrix(y_test, pred)
+    ax.imshow(cm, cmap="Purples")
+    ax.set_title(f"{point}\n{rec['model']} (MCC {rec['metrics']['mcc']:.3f})", fontsize=9)
+    ax.set_xticks([0, 1]); ax.set_yticks([0, 1])
+    ax.set_xticklabels(["pred 0", "pred 1"]); ax.set_yticklabels(["true 0", "true 1"])
+    for i in range(2):
+        for j in range(2):
+            ax.text(j, i, f"{cm[i, j]:,}", ha="center", va="center",
+                    color="white" if cm[i, j] > cm.max() / 2 else "black", fontsize=9)
+fig.tight_layout(); fig.savefig(FIG_DIR / "confusion_matrices.png", dpi=150); plt.close(fig)
+print(f"Wrote {FIG_DIR / 'confusion_matrices.png'}")
+
+# --- One-sample hypothesis test of the best-ensemble MCC vs the 0.90 target ---
+RQ1_TARGET = 0.90
+hyp_rows = []
+for point in points:
+    rec = _best_record(point)
+    y_pred = (rec["test_prob"] >= rec["threshold"]).astype(np.int8)
+    mcc_point, ci_lo, ci_hi = mcc_with_ci(y_test, y_pred, n_boot=1000, seed=RANDOM_SEED)
+    test = one_sample_threshold_test(mcc_point, ci_lo, ci_hi, RQ1_TARGET, metric_name="MCC")
+    hyp_rows.append({
+        "prediction_point": point, "model": rec["model"], "metric": "mcc",
+        "value": round(mcc_point, 4), "ci_low": round(ci_lo, 4), "ci_high": round(ci_hi, 4),
+        "threshold_target": RQ1_TARGET, "reject_h0": test["reject"],
+        "decision": test["decision"], "margin": round(test["margin"], 4),
+        "narrative": test["narrative"],
+    })
+    print(f"  {point:14s} {rec['model']:20s} MCC {mcc_point:.4f} "
+          f"[{ci_lo:.4f}, {ci_hi:.4f}]  {test['decision']} vs {RQ1_TARGET}")
+
+hyp_df = pl.DataFrame(hyp_rows)
+hyp_df.write_csv(str(TABLES_DIR / "rq1_google_hypothesis_test.csv"))
+print(f"Wrote {TABLES_DIR / 'rq1_google_hypothesis_test.csv'}")
