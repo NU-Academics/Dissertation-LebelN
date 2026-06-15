@@ -53,6 +53,7 @@ outputs/tables/*
 outputs/figures/*
 outputs/preprocessed/*
 outputs/features/*
+outputs/optuna/*
 !outputs/.gitkeep
 !outputs/tables/.gitkeep
 !outputs/figures/.gitkeep
