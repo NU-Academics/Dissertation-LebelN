@@ -1,0 +1,11 @@
+model: xgb
+prediction_point: at_submission
+random_state: 42
+cv_mcc_mean: 0.8129087540822487
+params:
+  n_estimators: 200
+  max_depth: 9
+  learning_rate: 0.01895326397099061
+  subsample: 0.5659613918909442
+  colsample_bytree: 0.5156760350062762
+  min_child_weight: 4

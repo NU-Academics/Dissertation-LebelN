@@ -1,0 +1,8 @@
+model: brf
+prediction_point: early_runtime
+random_state: 42
+cv_mcc_mean: 0.8473449729154849
+params:
+  n_estimators: 800
+  max_depth: 35
+  min_samples_leaf: 5

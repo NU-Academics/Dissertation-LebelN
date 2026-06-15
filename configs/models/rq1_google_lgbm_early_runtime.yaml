@@ -1,0 +1,11 @@
+model: lgbm
+prediction_point: early_runtime
+random_state: 42
+cv_mcc_mean: 0.8489914083698678
+params:
+  n_estimators: 604
+  num_leaves: 416
+  learning_rate: 0.01690034561221089
+  colsample_bytree: 0.7800784857260071
+  subsample: 0.7530060016818737
+  min_child_samples: 677

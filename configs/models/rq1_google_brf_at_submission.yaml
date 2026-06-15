@@ -1,0 +1,8 @@
+model: brf
+prediction_point: at_submission
+random_state: 42
+cv_mcc_mean: 0.8119316936971483
+params:
+  n_estimators: 1200
+  max_depth: 50
+  min_samples_leaf: 20

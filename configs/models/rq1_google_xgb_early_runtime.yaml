@@ -1,0 +1,11 @@
+model: xgb
+prediction_point: early_runtime
+random_state: 42
+cv_mcc_mean: 0.8478905594802314
+params:
+  n_estimators: 1368
+  max_depth: 7
+  learning_rate: 0.010044631032073452
+  subsample: 0.9753335981697644
+  colsample_bytree: 0.6022596982816155
+  min_child_weight: 4
