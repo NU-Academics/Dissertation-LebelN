@@ -80,6 +80,13 @@ else:
 if REPO_DIR not in sys.path:
     sys.path.insert(0, REPO_DIR)
 
+# Colab caches imported modules in sys.modules, so a later `git pull` has no
+# effect until the runtime restarts. Drop any previously imported repo modules
+# here, so the freshly pulled source is what gets imported in the cells below.
+for _m in [m for m in list(sys.modules)
+           if m == "src" or m.startswith("src.") or m == "utils" or m.startswith("utils.")]:
+    del sys.modules[_m]
+
 # %%
 from utils.colab_setup import setup_drive, OUTPUT_DIR
 
@@ -269,6 +276,17 @@ else:
     conflicts = pl.read_parquet(CONFLICT_CACHE)
     print(f"Loaded {conflicts.height:,} conflict episodes <- {CONFLICT_CACHE.name}")
 
+# Guard: the strictly-prior history features must be present. If they are not, an
+# old conflict_labels module is loaded (restart the runtime) or a pre-history cache
+# was reloaded (set REBUILD_CONFLICTS = True).
+_expected_history = {"prior_fail_total", "evicted_prior_fail", "coll_prior_fail"}
+assert _expected_history <= set(conflicts.columns), (
+    "History features missing from the conflict frame: "
+    f"{sorted(_expected_history - set(conflicts.columns))}. Restart the Colab "
+    "runtime so the pulled conflict_labels is imported, and rebuild "
+    "(REBUILD_CONFLICTS = True)."
+)
+
 # Conflict-rate and class balance per type (the calibration / concentration view).
 print("\nConflict episodes by type (positive = clean resolution):")
 for ct in CONFLICT_TYPES:
@@ -301,8 +319,14 @@ print(f"{len(FEATURE_COLS)} feature columns (incl. {len(CONFLICT_TYPES)} conflic
 
 
 def _split_mask(df: pl.DataFrame) -> pl.Series:
-    """Deterministic [0, 1) hash of conflict_id for the group split."""
-    return (df["conflict_id"].hash(seed=RANDOM_SEED) % 1_000_000) / 1_000_000
+    """Deterministic [0, 1) hash of the entity `group_key` for the group split.
+
+    Splitting on `group_key` (the machine for contention, the instance for
+    inversion, the collection for violation) rather than `conflict_id` (per
+    episode) is what stops a recurring entity's episodes leaking across train /
+    test: an instance that contributes many inversion episodes, or a machine with
+    many contended windows, lands entirely on one side."""
+    return (df["group_key"].hash(seed=RANDOM_SEED) % 1_000_000) / 1_000_000
 
 
 _u = _split_mask(conflicts)
@@ -310,10 +334,10 @@ train_df = conflicts.filter(_u >= 0.30)
 val_df = conflicts.filter((_u >= 0.15) & (_u < 0.30))
 test_df = conflicts.filter(_u < 0.15)
 
-# No conflict episode may straddle the split.
-_ids = [set(d["conflict_id"].to_list()) for d in (train_df, val_df, test_df)]
+# No entity may straddle the split (the leakage guard).
+_ids = [set(d["group_key"].to_list()) for d in (train_df, val_df, test_df)]
 assert not (_ids[0] & _ids[1]) and not (_ids[0] & _ids[2]) and not (_ids[1] & _ids[2]), \
-    "conflict_id straddles the split; hashing is wrong."
+    "group_key straddles the split; hashing is wrong."
 for _name, _d in (("train", train_df), ("val", val_df), ("test", test_df)):
     _p = int(_d.filter(pl.col(LABEL_COLUMN) == 1).height)
     print(f"  {_name:5s} {_d.height:>8,} | clean {_p:>7,} ({_p / max(_d.height, 1):.3f})")
