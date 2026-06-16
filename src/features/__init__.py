@@ -33,7 +33,15 @@ and 11 (Section 3.8) after the per-attempt redesign removed the leakage and met
 the RQ1 >0.90 target at early-runtime on the episode matrix.
 """
 
-from src.features.conflict_labels import label_conflicts
+from src.features.conflict_labels import (
+    CONFLICT_TYPES,
+    LABEL_COLUMN,
+    META_COLUMNS,
+    build_conflict_dataset,
+    label_priority_inversion,
+    label_resource_contention,
+    label_scheduling_violations,
+)
 from src.features.episodes import (
     build_episode_history_sql,
     build_episode_intervals_sql,
@@ -83,7 +91,13 @@ __all__ = [
     "build_runtime_features_sql",
     "add_windowed_utilization",
     "build_windowed_utilization_sql",
-    "label_conflicts",
+    "label_resource_contention",
+    "label_priority_inversion",
+    "label_scheduling_violations",
+    "build_conflict_dataset",
+    "CONFLICT_TYPES",
+    "LABEL_COLUMN",
+    "META_COLUMNS",
     "build_episode_history_sql",
     "build_episode_intervals_sql",
     "build_episode_usage_subset_sql",
