@@ -155,6 +155,59 @@ def _machine_capacity(attrs_lf: pl.LazyFrame) -> pl.LazyFrame:
     )
 
 
+# ---------------------------------------------------------------------------
+# Strictly-prior history (the dominant failure signal, leakage-safe)
+# ---------------------------------------------------------------------------
+def prior_counts(events_lf: pl.LazyFrame, query_lf: pl.LazyFrame, keys: list[str]) -> pl.LazyFrame:
+    """Count each entity's earlier FAIL/LOST and SCHEDULE events strictly before a
+    query timestamp.
+
+    This is the leakage-safe way to attach the RQ1-dominant resubmission /
+    prior-failure signal to a conflict episode: for every ``query_lf`` row (keyed
+    by ``keys`` plus a ``qtime`` column) it returns the number of that entity's
+    FAIL/LOST events (``prior_fail``) and SCHEDULE events (``prior_resub``) whose
+    ``time`` is strictly less than ``qtime``.
+
+    Implementation: union the entity's history events with the query rows, order
+    each entity's combined stream by time (with the query placed before
+    same-timestamp events so an event at exactly ``qtime`` is excluded), and read
+    the cumulative event count at each query row. Near-linear, no per-row join
+    blow-up. The caller joins the result back on ``keys`` plus ``qtime == time``.
+
+    Args:
+        events_lf: event stream carrying ``type``, ``time``, and ``keys``.
+        query_lf: one row per conflict episode with ``keys`` and ``qtime``.
+        keys: entity key columns (``["collection_id", "instance_index"]`` for
+            instance history, ``["collection_id"]`` for collection history).
+    """
+    history = events_lf.filter(
+        pl.col("type").is_in([EVENT_SCHEDULE, EVENT_FAIL, EVENT_LOST])
+    ).select(
+        *keys,
+        t=pl.col("time"),
+        dfail=pl.col("type").is_in(list(_TERMINAL_FAIL)).cast(pl.Int32),
+        dsched=(pl.col("type") == EVENT_SCHEDULE).cast(pl.Int32),
+        _q=pl.lit(0, dtype=pl.Int8),
+    )
+    query = query_lf.select(
+        *keys,
+        t=pl.col("qtime"),
+        dfail=pl.lit(0, dtype=pl.Int32),
+        dsched=pl.lit(0, dtype=pl.Int32),
+        _q=pl.lit(1, dtype=pl.Int8),
+    )
+    # _ord places the query (0) before same-timestamp events (1), so the cumulative
+    # count at a query row excludes events at exactly qtime (strict "<" semantics).
+    combined = pl.concat([history, query]).with_columns(
+        _ord=pl.when(pl.col("_q") == 1).then(0).otherwise(1)
+    )
+    counted = combined.with_columns(
+        prior_fail=pl.col("dfail").cum_sum().over(keys, order_by=["t", "_ord"]),
+        prior_resub=pl.col("dsched").cum_sum().over(keys, order_by=["t", "_ord"]),
+    )
+    return counted.filter(pl.col("_q") == 1).select(*keys, "t", "prior_fail", "prior_resub")
+
+
 def _finalize(lf: pl.LazyFrame, feature_cols: list[str]) -> pl.LazyFrame:
     """Order columns into the shared envelope: meta, conflict_type, features,
     label. Keeps every labeler's output union-compatible."""
@@ -202,8 +255,11 @@ def label_resource_contention(
     Detection-time features: ``n_concurrent``, ``sum_cpu_request``,
     ``sum_memory_request``, ``max_cpu_request``, ``max_memory_request``,
     ``cpu_oversub_ratio``, ``memory_oversub_ratio``, ``capacity_cpus``,
-    ``capacity_memory``, ``mean_priority``, ``max_priority``, ``frac_production``.
-    All are computable from requests and counts observed at the window start.
+    ``capacity_memory``, ``mean_priority``, ``max_priority``, ``frac_production``,
+    and the resident instances' strictly-prior history aggregated over the window
+    (``prior_fail_total``, ``prior_fail_max``, ``frac_with_prior_fail``,
+    ``prior_resub_mean``). All are computable from requests, counts, and prior
+    events observed at the window start.
     """
     inst = _instance_summary(events_lf)
     cap = _machine_capacity(attrs_lf)
@@ -238,8 +294,24 @@ def label_resource_contention(
         )
         .explode("window")
         .with_columns(
-            is_production=(pl.col("submit_priority") >= PRIORITY_MONITORING_LOW).cast(pl.Int8)
+            is_production=(pl.col("submit_priority") >= PRIORITY_MONITORING_LOW).cast(pl.Int8),
+            window_start=pl.col("window") * WINDOW_US,
         )
+    )
+
+    # Per resident instance, its strictly-prior failure / resubmission history as
+    # of the window start (counted before window_start, so leakage-safe).
+    rc_query = exploded.select(
+        "collection_id", "instance_index", qtime=pl.col("window_start")
+    ).unique()
+    rc_priors = prior_counts(events_lf, rc_query, ["collection_id", "instance_index"]).rename(
+        {"t": "window_start"}
+    )
+    exploded = exploded.join(
+        rc_priors, on=["collection_id", "instance_index", "window_start"], how="left"
+    ).with_columns(
+        prior_fail=pl.col("prior_fail").fill_null(0),
+        prior_resub=pl.col("prior_resub").fill_null(0),
     )
 
     grouped = exploded.group_by("machine_id", "window").agg(
@@ -251,6 +323,11 @@ def label_resource_contention(
         mean_priority=pl.col("submit_priority").mean(),
         max_priority=pl.col("submit_priority").max(),
         frac_production=pl.col("is_production").mean(),
+        # Strictly-prior history of the resident instances (detection-time).
+        prior_fail_total=pl.col("prior_fail").sum(),
+        prior_fail_max=pl.col("prior_fail").max(),
+        frac_with_prior_fail=(pl.col("prior_fail") > 0).mean(),
+        prior_resub_mean=pl.col("prior_resub").mean(),
         # Label inputs: a window escalates if any resident instance failed.
         _n_failed=pl.col("failed").sum(),
         _n_finished=pl.col("finished").sum(),
@@ -304,6 +381,10 @@ def label_resource_contention(
         "mean_priority",
         "max_priority",
         "frac_production",
+        "prior_fail_total",
+        "prior_fail_max",
+        "frac_with_prior_fail",
+        "prior_resub_mean",
     ]
     return _finalize(flagged, feature_cols)
 
@@ -328,8 +409,10 @@ def label_priority_inversion(events_lf: pl.LazyFrame) -> pl.LazyFrame:
         used across the three conflict types.
 
     Detection-time features: ``evicted_priority``, ``replacing_priority``,
-    ``priority_gap``, ``evicted_scheduling_class``, ``evicted_is_production``. All
-    are observable at the eviction instant.
+    ``priority_gap``, ``evicted_scheduling_class``, ``evicted_is_production``, and
+    the evicted instance's strictly-prior history (``evicted_prior_fail``,
+    ``evicted_prior_resub``, ``evicted_has_prior_fail``). All are observable at the
+    eviction instant.
     """
     inst = _instance_summary(events_lf)
 
@@ -365,6 +448,15 @@ def label_priority_inversion(events_lf: pl.LazyFrame) -> pl.LazyFrame:
         tolerance=INVERSION_MATCH_US,
     ).rename({"time": "evict_time"})
 
+    # Strictly-prior history of the evicted instance, counted up to the eviction
+    # instant (the RQ1-dominant resubmission / prior-failure signal, leakage-safe).
+    inv_priors = prior_counts(
+        events_lf,
+        matched.select("collection_id", "instance_index", qtime=pl.col("evict_time")),
+        ["collection_id", "instance_index"],
+    ).rename({"t": "evict_time", "prior_fail": "evicted_prior_fail",
+              "prior_resub": "evicted_prior_resub"})
+
     flagged = (
         matched.filter(
             pl.col("replacing_priority").is_not_null()
@@ -373,6 +465,11 @@ def label_priority_inversion(events_lf: pl.LazyFrame) -> pl.LazyFrame:
         .join(
             inst.select("collection_id", "instance_index", "failed"),
             on=["collection_id", "instance_index"],
+            how="left",
+        )
+        .join(
+            inv_priors,
+            on=["collection_id", "instance_index", "evict_time"],
             how="left",
         )
         .with_columns(
@@ -389,6 +486,9 @@ def label_priority_inversion(events_lf: pl.LazyFrame) -> pl.LazyFrame:
             end_time=pl.col("evict_time") + INVERSION_MATCH_US,
             priority_gap=pl.col("evicted_priority") - pl.col("replacing_priority"),
             evicted_is_production=(pl.col("evicted_priority") >= PRIORITY_MONITORING_LOW).cast(pl.Int8),
+            evicted_prior_fail=pl.col("evicted_prior_fail").fill_null(0),
+            evicted_prior_resub=pl.col("evicted_prior_resub").fill_null(0),
+            evicted_has_prior_fail=(pl.col("evicted_prior_fail").fill_null(0) > 0).cast(pl.Int8),
             # Escalate (0) if the evicted instance failed; clean (1) otherwise
             # (finished or still progressing). Failure-based convention.
             resolution_outcome=(pl.col("failed").fill_null(0) == 0).cast(pl.Int8),
@@ -401,6 +501,9 @@ def label_priority_inversion(events_lf: pl.LazyFrame) -> pl.LazyFrame:
         "priority_gap",
         "evicted_scheduling_class",
         "evicted_is_production",
+        "evicted_prior_fail",
+        "evicted_prior_resub",
+        "evicted_has_prior_fail",
     ]
     return _finalize(flagged, feature_cols)
 
@@ -430,8 +533,10 @@ def label_scheduling_violations(events_lf: pl.LazyFrame) -> pl.LazyFrame:
         flag thresholds), else 0.
 
     Detection-time features: ``n_schedule``, ``n_evict``, ``n_fail``,
-    ``evict_ratio``, ``fail_ratio``, ``scheduling_class``. The next-window
-    stabilization used for the label is never exposed as a feature.
+    ``evict_ratio``, ``fail_ratio``, ``scheduling_class``, and the collection's
+    strictly-prior churn history before the window (``coll_prior_fail``,
+    ``coll_prior_resub``). The next-window stabilization used for the label is
+    never exposed as a feature.
     """
     binned = (
         events_lf.with_columns(window=(pl.col("time") // WINDOW_US))
@@ -447,6 +552,20 @@ def label_scheduling_violations(events_lf: pl.LazyFrame) -> pl.LazyFrame:
             fail_ratio=pl.col("n_fail") / pl.max_horizontal("n_schedule", pl.lit(1)),
         )
     )
+
+    # Collection-level strictly-prior churn before each window start (leakage-safe).
+    sv_priors = prior_counts(
+        events_lf,
+        binned.select("collection_id", qtime=pl.col("window") * WINDOW_US).unique(),
+        ["collection_id"],
+    ).rename({"t": "_window_start", "prior_fail": "coll_prior_fail",
+              "prior_resub": "coll_prior_resub"})
+    binned = binned.with_columns(_window_start=pl.col("window") * WINDOW_US).join(
+        sv_priors, on=["collection_id", "_window_start"], how="left"
+    ).with_columns(
+        coll_prior_fail=pl.col("coll_prior_fail").fill_null(0),
+        coll_prior_resub=pl.col("coll_prior_resub").fill_null(0),
+    ).drop("_window_start")
 
     # Next-window escalation per collection (for the label only).
     nxt = binned.select(
@@ -494,6 +613,8 @@ def label_scheduling_violations(events_lf: pl.LazyFrame) -> pl.LazyFrame:
         "evict_ratio",
         "fail_ratio",
         "scheduling_class",
+        "coll_prior_fail",
+        "coll_prior_resub",
     ]
     return _finalize(flagged, feature_cols)
 
