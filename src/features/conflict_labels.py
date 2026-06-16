@@ -77,9 +77,14 @@ LABEL_COLUMN: str = "resolution_outcome"
 
 #: Envelope columns that identify an episode but are NOT model features. The
 #: notebook drops these before training (``conflict_type`` is kept and one-hot
-#: encoded, so it is deliberately absent here).
+#: encoded, so it is deliberately absent here). ``group_key`` is the entity the
+#: train / test split must group on so no entity straddles the boundary (the
+#: machine for contention, the instance for inversion, the collection for
+#: violation); splitting on ``conflict_id`` instead would let a recurring entity's
+#: episodes leak across the split.
 META_COLUMNS: tuple[str, ...] = (
     "conflict_id",
+    "group_key",
     "machine_id",
     "start_time",
     "end_time",
@@ -213,6 +218,7 @@ def _finalize(lf: pl.LazyFrame, feature_cols: list[str]) -> pl.LazyFrame:
     label. Keeps every labeler's output union-compatible."""
     ordered = [
         "conflict_id",
+        "group_key",
         "conflict_type",
         "machine_id",
         "start_time",
@@ -358,6 +364,8 @@ def label_resource_contention(
             + pl.col("machine_id").cast(pl.Utf8)
             + pl.lit("_")
             + pl.col("window").cast(pl.Utf8),
+            # Split entity: the machine (its windows must not straddle the split).
+            group_key=pl.lit("m_") + pl.col("machine_id").cast(pl.Utf8),
             conflict_type=pl.lit("resource_contention"),
             start_time=pl.col("window") * WINDOW_US,
             end_time=(pl.col("window") + 1) * WINDOW_US,
@@ -481,6 +489,11 @@ def label_priority_inversion(events_lf: pl.LazyFrame) -> pl.LazyFrame:
             + pl.col("instance_index").cast(pl.Utf8)
             + pl.lit("_")
             + pl.col("evict_time").cast(pl.Utf8),
+            # Split entity: the instance (all its evictions must stay on one side).
+            group_key=pl.lit("i_")
+            + pl.col("collection_id").cast(pl.Utf8)
+            + pl.lit("_")
+            + pl.col("instance_index").cast(pl.Utf8),
             conflict_type=pl.lit("priority_inversion"),
             start_time=pl.col("evict_time"),
             end_time=pl.col("evict_time") + INVERSION_MATCH_US,
@@ -594,6 +607,8 @@ def label_scheduling_violations(events_lf: pl.LazyFrame) -> pl.LazyFrame:
             + pl.col("collection_id").cast(pl.Utf8)
             + pl.lit("_")
             + pl.col("window").cast(pl.Utf8),
+            # Split entity: the collection (its windows must not straddle the split).
+            group_key=pl.lit("c_") + pl.col("collection_id").cast(pl.Utf8),
             conflict_type=pl.lit("scheduling_violation"),
             machine_id=pl.lit(None, dtype=pl.Int64),
             start_time=pl.col("window") * WINDOW_US,
