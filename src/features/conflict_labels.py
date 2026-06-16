@@ -193,8 +193,11 @@ def label_resource_contention(
 
     Returns:
         One row per flagged ``(machine_id, window)`` in the shared envelope.
-        ``resolution_outcome`` is 1 when every resident instance reaches FINISH
-        with no FAIL/LOST, else 0.
+        ``resolution_outcome`` is 1 when no resident instance failed in the
+        window (clean), 0 when at least one FAIL/LOST occurred (escalation).
+        Still-running instances are treated as non-escalating, so the label is
+        censoring-robust at the cost of some optimism for windows whose
+        instances complete after the window.
 
     Detection-time features: ``n_concurrent``, ``sum_cpu_request``,
     ``sum_memory_request``, ``max_cpu_request``, ``max_memory_request``,
@@ -248,7 +251,7 @@ def label_resource_contention(
         mean_priority=pl.col("submit_priority").mean(),
         max_priority=pl.col("submit_priority").max(),
         frac_production=pl.col("is_production").mean(),
-        # Label inputs: clean only if everyone finished and nobody failed.
+        # Label inputs: a window escalates if any resident instance failed.
         _n_failed=pl.col("failed").sum(),
         _n_finished=pl.col("finished").sum(),
         _n_terminal=pl.col("has_terminal").sum(),
@@ -262,9 +265,12 @@ def label_resource_contention(
         )
         .filter(
             (pl.col("n_concurrent") >= MIN_CONCURRENT)
-            # Censoring guard: every resident instance's terminal must be observed
-            # in the window, else the window's clean / escalate outcome is unknown.
-            & (pl.col("_n_terminal") == pl.col("n_concurrent"))
+            # Light censoring guard: require at least one observed terminal so the
+            # window is not labeled purely from still-running instances. A strict
+            # all-observed rule drops every busy window (busy machines, where
+            # contention occurs, almost always carry a long-running instance that
+            # does not terminate in-window), so coverage is partial by design.
+            & (pl.col("_n_terminal") >= 1)
             & (
                 (pl.col("cpu_oversub_ratio") > OVERSUBSCRIPTION_RATIO)
                 | (pl.col("memory_oversub_ratio") > OVERSUBSCRIPTION_RATIO)
@@ -278,9 +284,10 @@ def label_resource_contention(
             conflict_type=pl.lit("resource_contention"),
             start_time=pl.col("window") * WINDOW_US,
             end_time=(pl.col("window") + 1) * WINDOW_US,
-            resolution_outcome=(
-                (pl.col("_n_failed") == 0) & (pl.col("_n_finished") == pl.col("n_concurrent"))
-            ).cast(pl.Int8),
+            # Escalate (0) if any resident instance failed; clean (1) otherwise.
+            # Still-running (censored, non-failing) instances do not count as
+            # escalation, which is what keeps busy contended windows in scope.
+            resolution_outcome=(pl.col("_n_failed") == 0).cast(pl.Int8),
         )
     )
 
@@ -315,8 +322,10 @@ def label_priority_inversion(events_lf: pl.LazyFrame) -> pl.LazyFrame:
 
     Returns:
         One row per inverted EVICT in the shared envelope.
-        ``resolution_outcome`` is 1 when the evicted instance is rescheduled and
-        reaches FINISH without further eviction churn, else 0.
+        ``resolution_outcome`` is 1 when the evicted instance did not fail
+        (finished or still progressing), 0 when it reached FAIL/LOST. Still-running
+        instances count as non-escalating, matching the failure-based convention
+        used across the three conflict types.
 
     Detection-time features: ``evicted_priority``, ``replacing_priority``,
     ``priority_gap``, ``evicted_scheduling_class``, ``evicted_is_production``. All
@@ -362,14 +371,10 @@ def label_priority_inversion(events_lf: pl.LazyFrame) -> pl.LazyFrame:
             & (pl.col("evicted_priority") > pl.col("replacing_priority"))
         )
         .join(
-            inst.select("collection_id", "instance_index", "finished", "failed",
-                        "has_terminal", "evict_count"),
+            inst.select("collection_id", "instance_index", "failed"),
             on=["collection_id", "instance_index"],
             how="left",
         )
-        # Censoring guard: drop evicted instances whose terminal is unobserved in
-        # the window (their resolution is unknown, not an escalation).
-        .filter(pl.col("has_terminal").fill_null(0) == 1)
         .with_columns(
             conflict_id=pl.lit("pi_")
             + pl.col("machine_id").cast(pl.Utf8)
@@ -384,13 +389,9 @@ def label_priority_inversion(events_lf: pl.LazyFrame) -> pl.LazyFrame:
             end_time=pl.col("evict_time") + INVERSION_MATCH_US,
             priority_gap=pl.col("evicted_priority") - pl.col("replacing_priority"),
             evicted_is_production=(pl.col("evicted_priority") >= PRIORITY_MONITORING_LOW).cast(pl.Int8),
-            # Clean resolution: eventually finished, never failed, and not stuck
-            # in repeated eviction (the eviction we labeled is the only one).
-            resolution_outcome=(
-                (pl.col("finished") == 1)
-                & (pl.col("failed") == 0)
-                & (pl.col("evict_count") <= 1)
-            ).cast(pl.Int8),
+            # Escalate (0) if the evicted instance failed; clean (1) otherwise
+            # (finished or still progressing). Failure-based convention.
+            resolution_outcome=(pl.col("failed").fill_null(0) == 0).cast(pl.Int8),
         )
     )
 
