@@ -127,9 +127,13 @@ def _instance_summary(events_lf: pl.LazyFrame) -> pl.LazyFrame:
     """Per-instance request, submit-time priority / scheduling class, and
     terminal outcome flags, derived from the raw event stream.
 
-    The outcome flags (``finished`` / ``failed`` / ``evict_count``) feed the
-    label only; the request and submit-time priority / scheduling class are
-    detection-time attributes safe to use as features.
+    The outcome flags (``finished`` / ``failed`` / ``evict_count`` /
+    ``has_terminal``) feed the label only; the request and submit-time priority /
+    scheduling class are detection-time attributes safe to use as features.
+    ``has_terminal`` is the censoring guard: an instance whose terminal event
+    (FINISH or FAIL/LOST) is not observed inside the working-set window is
+    right-censored, so its resolution outcome is unknown and the caller drops it
+    rather than mislabeling unobserved completion as escalation.
     """
     return events_lf.group_by("collection_id", "instance_index").agg(
         cpu_request=pl.col("cpu_request").max(),
@@ -138,6 +142,7 @@ def _instance_summary(events_lf: pl.LazyFrame) -> pl.LazyFrame:
         scheduling_class=pl.col("scheduling_class").sort_by("time").first(),
         finished=(pl.col("type") == EVENT_FINISH).any().cast(pl.Int8),
         failed=pl.col("type").is_in(list(_TERMINAL_FAIL)).any().cast(pl.Int8),
+        has_terminal=pl.col("type").is_in([EVENT_FINISH, EVENT_FAIL, EVENT_LOST]).any().cast(pl.Int8),
         evict_count=(pl.col("type") == EVENT_EVICT).sum(),
     )
 
@@ -246,6 +251,7 @@ def label_resource_contention(
         # Label inputs: clean only if everyone finished and nobody failed.
         _n_failed=pl.col("failed").sum(),
         _n_finished=pl.col("finished").sum(),
+        _n_terminal=pl.col("has_terminal").sum(),
     )
 
     flagged = (
@@ -256,6 +262,9 @@ def label_resource_contention(
         )
         .filter(
             (pl.col("n_concurrent") >= MIN_CONCURRENT)
+            # Censoring guard: every resident instance's terminal must be observed
+            # in the window, else the window's clean / escalate outcome is unknown.
+            & (pl.col("_n_terminal") == pl.col("n_concurrent"))
             & (
                 (pl.col("cpu_oversub_ratio") > OVERSUBSCRIPTION_RATIO)
                 | (pl.col("memory_oversub_ratio") > OVERSUBSCRIPTION_RATIO)
@@ -359,10 +368,14 @@ def label_priority_inversion(events_lf: pl.LazyFrame) -> pl.LazyFrame:
     flagged = (
         matched.filter(pl.col("evicted_priority") > pl.col("replacing_priority"))
         .join(
-            inst.select("collection_id", "instance_index", "finished", "failed", "evict_count"),
+            inst.select("collection_id", "instance_index", "finished", "failed",
+                        "has_terminal", "evict_count"),
             on=["collection_id", "instance_index"],
             how="left",
         )
+        # Censoring guard: drop evicted instances whose terminal is unobserved in
+        # the window (their resolution is unknown, not an escalation).
+        .filter(pl.col("has_terminal").fill_null(0) == 1)
         .with_columns(
             conflict_id=pl.lit("pi_")
             + pl.col("machine_id").cast(pl.Utf8)
@@ -401,13 +414,20 @@ def label_priority_inversion(events_lf: pl.LazyFrame) -> pl.LazyFrame:
 # ---------------------------------------------------------------------------
 # 3. Scheduling violations
 # ---------------------------------------------------------------------------
-def label_scheduling_violations(coll_events_lf: pl.LazyFrame) -> pl.LazyFrame:
+def label_scheduling_violations(events_lf: pl.LazyFrame) -> pl.LazyFrame:
     """Label collection windows with abnormal SCHEDULE-to-EVICT or
     SCHEDULE-to-FAIL ratios.
 
+    The SCHEDULE / EVICT / FAIL churn that signals a scheduling violation lives in
+    the *instance* event stream, not in ``collection_events`` (collections rarely
+    emit EVICT/FAIL events of their own). This labeler therefore aggregates the
+    instance events of each collection into per-window counts.
+
     Args:
-        coll_events_lf: collection_events with ``time``, ``type``,
-            ``collection_id``, ``scheduling_class`` (``priority`` optional).
+        events_lf: instance_events with ``time``, ``type``, ``collection_id``,
+            ``scheduling_class`` (``priority`` optional). Should be scoped to a
+            sample of *whole collections* so a collection's churn is observed in
+            full, rather than the machine-scoped slice used for the other types.
 
     Returns:
         One row per flagged ``(collection_id, window)`` in the shared envelope.
@@ -419,17 +439,14 @@ def label_scheduling_violations(coll_events_lf: pl.LazyFrame) -> pl.LazyFrame:
     ``evict_ratio``, ``fail_ratio``, ``scheduling_class``. The next-window
     stabilization used for the label is never exposed as a feature.
     """
-    has_priority = "priority" in coll_events_lf.collect_schema().names()
-
     binned = (
-        coll_events_lf.with_columns(window=(pl.col("time") // WINDOW_US))
+        events_lf.with_columns(window=(pl.col("time") // WINDOW_US))
         .group_by("collection_id", "window")
         .agg(
             n_schedule=(pl.col("type") == EVENT_SCHEDULE).sum(),
             n_evict=(pl.col("type") == EVENT_EVICT).sum(),
             n_fail=pl.col("type").is_in(list(_TERMINAL_FAIL)).sum(),
             scheduling_class=pl.col("scheduling_class").max(),
-            priority=(pl.col("priority").max() if has_priority else pl.lit(None)),
         )
         .with_columns(
             evict_ratio=pl.col("n_evict") / pl.max_horizontal("n_schedule", pl.lit(1)),
@@ -492,11 +509,22 @@ def label_scheduling_violations(coll_events_lf: pl.LazyFrame) -> pl.LazyFrame:
 # ---------------------------------------------------------------------------
 def build_conflict_dataset(
     usage_lf: pl.LazyFrame,
-    events_lf: pl.LazyFrame,
+    events_machine_lf: pl.LazyFrame,
     attrs_lf: pl.LazyFrame,
-    coll_events_lf: pl.LazyFrame,
+    events_collection_lf: pl.LazyFrame,
 ) -> pl.LazyFrame:
     """Union the three conflict-type labelers into one pooled dataset.
+
+    Two working-set scopes feed the union because the conflict types depend on
+    different interaction structures:
+
+    - ``usage_lf`` / ``events_machine_lf`` are *machine-scoped* (all instances on
+      a sample of whole machines), so contention and priority inversion observe
+      true co-residency on a machine. ``attrs_lf`` supplies that machine's
+      capacity.
+    - ``events_collection_lf`` is *collection-scoped* (all instances of a sample
+      of whole collections), so a collection's scheduling churn is observed in
+      full.
 
     Uses a diagonal concat so each labeler keeps its own detection-time feature
     columns; the per-type columns absent from a given row are filled with null
@@ -505,8 +533,8 @@ def build_conflict_dataset(
     ``resolution_outcome`` as the supervised target.
     """
     parts = [
-        label_resource_contention(usage_lf, events_lf, attrs_lf),
-        label_priority_inversion(events_lf),
-        label_scheduling_violations(coll_events_lf),
+        label_resource_contention(usage_lf, events_machine_lf, attrs_lf),
+        label_priority_inversion(events_machine_lf),
+        label_scheduling_violations(events_collection_lf),
     ]
     return pl.concat(parts, how="diagonal_relaxed")
