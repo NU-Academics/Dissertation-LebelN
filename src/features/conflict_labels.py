@@ -319,54 +319,48 @@ def label_priority_inversion(events_lf: pl.LazyFrame) -> pl.LazyFrame:
         reaches FINISH without further eviction churn, else 0.
 
     Detection-time features: ``evicted_priority``, ``replacing_priority``,
-    ``priority_gap``, ``evicted_scheduling_class``, ``evicted_is_production``,
-    ``n_candidate_replacers``. All are observable at the eviction instant.
+    ``priority_gap``, ``evicted_scheduling_class``, ``evicted_is_production``. All
+    are observable at the eviction instant.
     """
     inst = _instance_summary(events_lf)
 
+    # Sort by time so the as-of join below can run; ``time`` is the shared key.
     evicts = events_lf.filter(
         (pl.col("type") == EVENT_EVICT) & pl.col("machine_id").is_not_null()
     ).select(
         "collection_id",
         "instance_index",
         "machine_id",
-        evict_time=pl.col("time"),
+        "time",
         evicted_priority=pl.col("priority"),
         evicted_scheduling_class=pl.col("scheduling_class"),
-    )
+    ).sort("time")
 
     schedules = events_lf.filter(
         (pl.col("type") == EVENT_SCHEDULE) & pl.col("machine_id").is_not_null()
     ).select(
         "machine_id",
-        sched_time=pl.col("time"),
+        "time",
         replacing_priority=pl.col("priority"),
-    )
+    ).sort("time")
 
-    # Candidate replacers: same machine, scheduled within the match window after
-    # the evict. Keep the closest (earliest) replacer's priority per evict.
-    matched = (
-        evicts.join(schedules, on="machine_id", how="inner")
-        .filter(
-            (pl.col("sched_time") > pl.col("evict_time"))
-            & (pl.col("sched_time") <= pl.col("evict_time") + INVERSION_MATCH_US)
-        )
-        .group_by(
-            "collection_id",
-            "instance_index",
-            "machine_id",
-            "evict_time",
-            "evicted_priority",
-            "evicted_scheduling_class",
-        )
-        .agg(
-            replacing_priority=pl.col("replacing_priority").sort_by("sched_time").first(),
-            n_candidate_replacers=pl.len(),
-        )
-    )
+    # Nearest replacing SCHEDULE on the same machine within the match window after
+    # each EVICT, via an as-of join. This replaces the per-machine evict x schedule
+    # cross join (which is quadratic in a machine's event count and blows up memory)
+    # with a near-linear merge that keeps one replacer per evict.
+    matched = evicts.join_asof(
+        schedules,
+        on="time",
+        by="machine_id",
+        strategy="forward",
+        tolerance=INVERSION_MATCH_US,
+    ).rename({"time": "evict_time"})
 
     flagged = (
-        matched.filter(pl.col("evicted_priority") > pl.col("replacing_priority"))
+        matched.filter(
+            pl.col("replacing_priority").is_not_null()
+            & (pl.col("evicted_priority") > pl.col("replacing_priority"))
+        )
         .join(
             inst.select("collection_id", "instance_index", "finished", "failed",
                         "has_terminal", "evict_count"),
@@ -406,7 +400,6 @@ def label_priority_inversion(events_lf: pl.LazyFrame) -> pl.LazyFrame:
         "priority_gap",
         "evicted_scheduling_class",
         "evicted_is_production",
-        "n_candidate_replacers",
     ]
     return _finalize(flagged, feature_cols)
 
