@@ -109,14 +109,16 @@ def _priority_tier_expr(priority: pl.Expr) -> pl.Expr:
 
 def _per_instance_summary(events_lf: pl.LazyFrame) -> pl.DataFrame:
     """Reduce instance_events to one row per instance: terminal type, the
-    representative (terminal) priority_tier / scheduling_class, the event and
-    scheduled-episode counts, and the failure flag (terminal FAIL/LOST, V01)."""
+    submit-time (first-event) priority_tier / scheduling_class, the event and
+    scheduled-episode counts, and the failure flag (terminal FAIL/LOST, V01).
+    Priority and scheduling class use the first event, not the terminal one, so
+    the stratification keys do not encode the outcome (V35)."""
     return (
         events_lf.group_by(INSTANCE_KEY)
         .agg(
             pl.col("type").sort_by("time").last().alias("terminal_type"),
-            pl.col("priority").sort_by("time").last().alias("priority"),
-            pl.col("scheduling_class").sort_by("time").last().alias("scheduling_class"),
+            pl.col("priority").sort_by("time").first().alias("priority"),
+            pl.col("scheduling_class").sort_by("time").first().alias("scheduling_class"),
             pl.len().alias("n_events"),
             (pl.col("type") == EVENT_SCHEDULE).sum().alias("n_episodes"),
         )
@@ -281,11 +283,11 @@ def build_working_set_sql(
     fully-qualified, back-ticked BigQuery table names.
     """
     tier_case = f"""CASE
-            WHEN terminal_priority <= {PRIORITY_FREE_MAX} THEN 'free'
-            WHEN terminal_priority BETWEEN {PRIORITY_BEST_EFFORT_LOW} AND {PRIORITY_BEST_EFFORT_MAX} THEN 'best_effort'
-            WHEN terminal_priority BETWEEN {PRIORITY_MID_TIER_LOW} AND {PRIORITY_MID_TIER_MAX} THEN 'mid'
-            WHEN terminal_priority BETWEEN {PRIORITY_PRODUCTION_LOW} AND {PRIORITY_PRODUCTION_MAX} THEN 'production'
-            WHEN terminal_priority >= {PRIORITY_MONITORING_LOW} THEN 'monitoring'
+            WHEN submit_priority <= {PRIORITY_FREE_MAX} THEN 'free'
+            WHEN submit_priority BETWEEN {PRIORITY_BEST_EFFORT_LOW} AND {PRIORITY_BEST_EFFORT_MAX} THEN 'best_effort'
+            WHEN submit_priority BETWEEN {PRIORITY_MID_TIER_LOW} AND {PRIORITY_MID_TIER_MAX} THEN 'mid'
+            WHEN submit_priority BETWEEN {PRIORITY_PRODUCTION_LOW} AND {PRIORITY_PRODUCTION_MAX} THEN 'production'
+            WHEN submit_priority >= {PRIORITY_MONITORING_LOW} THEN 'monitoring'
             ELSE 'unknown'
         END"""
     return f"""
@@ -297,7 +299,7 @@ WITH inst AS (
         instance_index,
         first_schedule_time AS schedule_time,
         {tier_case} AS priority_tier,
-        terminal_scheduling_class AS scheduling_class,
+        submit_scheduling_class AS scheduling_class,
         IF(outcome = 'FAIL_LOST', 1, 0) AS is_failure,
         schedule_count AS n_episodes
     FROM {lifecycle_summary_table}

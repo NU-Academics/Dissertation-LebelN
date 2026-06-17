@@ -44,13 +44,15 @@ PRIORITY_TIER_LEVELS: list[str] = ["free", "best_effort", "mid", "production", "
 
 
 def priority_tier_expr() -> pl.Expr:
-    """Return the expression mapping ``terminal_priority`` to a band label.
+    """Return the expression mapping ``submit_priority`` to a band label.
 
     Bands follow Borg semantics (``src/data/schemas.py``): Free 0-99,
     Best-effort 100-115, Mid 116-119, Production 120-359, Monitoring 360+.
-    Motivation: V07.
+    Sourced from the submit-time priority (the value at the instance's first
+    event), not terminal_priority, which is the death-time value and leaks the
+    outcome at the prediction point (V35). Motivation: V07.
     """
-    p = pl.col("terminal_priority")
+    p = pl.col("submit_priority")
     return (
         pl.when(p <= PRIORITY_FREE_MAX).then(pl.lit("free"))
         .when((p >= PRIORITY_BEST_EFFORT_LOW) & (p <= PRIORITY_BEST_EFFORT_MAX)).then(pl.lit("best_effort"))
@@ -88,9 +90,12 @@ def add_scheduling_features(
     """Append the Tier 1 scheduling/priority/platform features.
 
     Expected input columns (from ``instance_lifecycle_summary``):
-        - ``terminal_priority`` (Int64), ``terminal_scheduling_class`` (Int64),
+        - ``submit_priority`` (Int64), ``submit_scheduling_class`` (Int64),
           ``terminal_machine_id`` (Int64), ``cpu_request`` (Float64),
           ``memory_request`` (Float64), ``queue_time_sec`` (Float64).
+          Priority and scheduling class use the submit-time values to avoid the
+          terminal-sourcing leak (V35); terminal_machine_id is the scheduled
+          machine, used only for the platform join.
 
     Args:
         lf: per-instance lifecycle LazyFrame.
@@ -120,7 +125,7 @@ def add_scheduling_features(
         lf
         .with_columns(priority_tier_expr())
         .with_columns(
-            pl.col("terminal_scheduling_class").cast(pl.Int64).alias("scheduling_class"),
+            pl.col("submit_scheduling_class").cast(pl.Int64).alias("scheduling_class"),
             pl.col("cpu_request").cast(pl.Float64),
             pl.col("memory_request").cast(pl.Float64),
             # Null-safe ratio: guard divide-by-zero, leave null when undefined.
