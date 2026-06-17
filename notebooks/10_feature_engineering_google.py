@@ -355,11 +355,11 @@ print(f"Working-set instances: {n_working_set:,}")
 # %%
 # Priority band CASE on the lifecycle summary (mirrors the sampler / V07 bands).
 _WS_TIER_CASE = f"""CASE
-        WHEN terminal_priority <= {PRIORITY_FREE_MAX} THEN 'free'
-        WHEN terminal_priority BETWEEN {PRIORITY_BEST_EFFORT_LOW} AND {PRIORITY_BEST_EFFORT_MAX} THEN 'best_effort'
-        WHEN terminal_priority BETWEEN {PRIORITY_MID_TIER_LOW} AND {PRIORITY_MID_TIER_MAX} THEN 'mid'
-        WHEN terminal_priority BETWEEN {PRIORITY_PRODUCTION_LOW} AND {PRIORITY_PRODUCTION_MAX} THEN 'production'
-        WHEN terminal_priority >= {PRIORITY_MONITORING_LOW} THEN 'monitoring'
+        WHEN submit_priority <= {PRIORITY_FREE_MAX} THEN 'free'
+        WHEN submit_priority BETWEEN {PRIORITY_BEST_EFFORT_LOW} AND {PRIORITY_BEST_EFFORT_MAX} THEN 'best_effort'
+        WHEN submit_priority BETWEEN {PRIORITY_MID_TIER_LOW} AND {PRIORITY_MID_TIER_MAX} THEN 'mid'
+        WHEN submit_priority BETWEEN {PRIORITY_PRODUCTION_LOW} AND {PRIORITY_PRODUCTION_MAX} THEN 'production'
+        WHEN submit_priority >= {PRIORITY_MONITORING_LOW} THEN 'monitoring'
         ELSE 'unknown' END"""
 
 _WS_INST_CTE = f"""
@@ -367,7 +367,7 @@ WITH inst AS (
     SELECT
         s.collection_id, s.instance_index,
         {_WS_TIER_CASE} AS priority_tier,
-        s.terminal_scheduling_class AS scheduling_class,
+        s.submit_scheduling_class AS scheduling_class,
         IF(s.outcome = 'FAIL_LOST', 1, 0) AS is_failure,
         s.schedule_count AS n_episodes,
         (w.collection_id IS NOT NULL) AS in_ws
@@ -655,8 +655,8 @@ tier1_hist_lf = add_tier1_historical(lifecycle_lf)
 #
 # | feature | definition |
 # |---|---|
-# | `priority_tier` | band of `terminal_priority`: Free 0-99, BestEffort 100-115, Mid 116-119, Production 120-359, Monitoring 360+ (one-hot). |
-# | `scheduling_class` | ordinal `terminal_scheduling_class` in 0-3. |
+# | `priority_tier` | band of `submit_priority` (submit-time, not terminal; V35): Free 0-99, BestEffort 100-115, Mid 116-119, Production 120-359, Monitoring 360+ (one-hot). |
+# | `scheduling_class` | ordinal `submit_scheduling_class` in 0-3 (submit-time, V35). |
 # | `platform_id` | machine micro-architecture for the scheduled machine (one-hot). |
 # | `cpu_request`, `memory_request` | requested resources at submission (passthrough). |
 # | `request_ratio` | `cpu_request / memory_request` (null-safe; null when `memory_request` is 0). |
@@ -664,8 +664,9 @@ tier1_hist_lf = add_tier1_historical(lifecycle_lf)
 
 # %%
 def _priority_tier_expr() -> pl.Expr:
-    """Map terminal_priority to a categorical band label (V07; schema bands)."""
-    p = pl.col("terminal_priority")
+    """Map submit_priority to a categorical band label (V07; schema bands).
+    Submit-time, not terminal_priority, which would leak the outcome (V35)."""
+    p = pl.col("submit_priority")
     return (
         pl.when(p <= PRIORITY_FREE_MAX).then(pl.lit("free"))
         .when((p >= PRIORITY_BEST_EFFORT_LOW) & (p <= PRIORITY_BEST_EFFORT_MAX)).then(pl.lit("best_effort"))
@@ -683,16 +684,18 @@ PRIORITY_TIER_LEVELS = ["free", "best_effort", "mid", "production", "monitoring"
 def add_tier1_scheduling(lf: pl.LazyFrame, platform_lookup: pl.LazyFrame) -> pl.LazyFrame:
     """Append Tier 1 scheduling features and their one-hot encodings.
 
-    Input: lifecycle-summary columns terminal_priority,
-    terminal_scheduling_class, terminal_machine_id, cpu_request,
-    memory_request, queue_time_sec. `platform_lookup` is a
-    (machine_id, platform_id) LazyFrame. Motivation: V07.
+    Input: lifecycle-summary columns submit_priority,
+    submit_scheduling_class, terminal_machine_id, cpu_request,
+    memory_request, queue_time_sec. Priority and scheduling class use the
+    submit-time values (V35); terminal_machine_id is the scheduled machine for
+    the platform join. `platform_lookup` is a (machine_id, platform_id)
+    LazyFrame. Motivation: V07.
     """
     out = (
         lf
         .with_columns(_priority_tier_expr())
         .with_columns(
-            pl.col("terminal_scheduling_class").cast(pl.Int64).alias("scheduling_class"),
+            pl.col("submit_scheduling_class").cast(pl.Int64).alias("scheduling_class"),
             pl.col("cpu_request").cast(pl.Float64),
             pl.col("memory_request").cast(pl.Float64),
             # Null-safe ratio: guard divide-by-zero, leave null when undefined.
