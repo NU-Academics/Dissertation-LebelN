@@ -1,4 +1,4 @@
-# `sql/` — BigQuery Cache and Exploration Queries
+# `sql/` - BigQuery Cache and Exploration Queries
 
 Two layers:
 

@@ -2,7 +2,7 @@
 
 Jupytext percent-format `.py` files are the primary work product. Each notebook captures the analytical narrative for one CRISP-DM step and produces the artifacts that downstream notebooks and `src/` modules depend on. `.ipynb` files are generated on demand in Colab and are gitignored.
 
-The decisions audit trail at `outputs/tables/eda_decisions.csv` is the canonical cross-reference for every validated analytical choice (rows `V01` through `V33` at the time of writing, plus the `P` planned and `O` open rows). When a notebook section references a decision by ID, the CSV is where to read the evidence and the next step.
+The decisions audit trail at `outputs/tables/eda_decisions.csv` is the canonical cross-reference for every validated analytical choice (rows `V01` through `V41` at the time of writing, plus the `P` planned and `O` open / resolved rows). When a notebook section references a decision by ID, the CSV is where to read the evidence and the next step.
 
 ## Phase 2: Data Understanding (complete)
 
@@ -79,15 +79,23 @@ Characterizes the attempt/episode structure of the event stream before the redes
 
 `09_backblaze_preprocessing.py` and `10_feature_engineering_backblaze.py` are the next preprocessing-and-feature notebooks.
 
-## Phase 4: Modeling (started)
+## Phase 4: Modeling (RQ1 to RQ3 Google complete)
 
 ### `12_rq1_ensemble_google.py`
 
-RQ1 ensemble failure prediction at the **episode grain** (the leakage-free grain from the per-attempt redesign). Loads the durable `episode_features` matrix, attaches `schedule_time` and a 1-based `sched_day`, applies the per-instance negative cap (`src/features/episodes.py::cap_negative_episodes`), and runs per-prediction-point (`at_submission`, `at_scheduling`, `early_runtime`) training across a model set (logistic regression, decision tree, random forest, balanced random forest, XGBoost, LightGBM, gradient boosting, plus a top-3 soft-voting stack) with walk-forward CV, a validation-tuned threshold, and percentile bootstrap CIs. The RQ1 >0.90 MCC target is tested at early-runtime. Writes `outputs/tables/rq1_google.csv`. A starting skeleton; thresholds, the SMOTE/NaN handling, and the model set are expected to be revised as runs return.
+RQ1 ensemble failure prediction at the **episode grain** (the leakage-free grain from the per-attempt redesign). Loads the durable `episode_features` matrix, attaches `schedule_time` and a 1-based `sched_day`, applies the per-instance negative cap (`src/features/episodes.py::cap_negative_episodes`), and runs per-prediction-point (`at_submission`, `at_scheduling`, `early_runtime`) training across a model set (logistic regression, decision tree, random forest, balanced random forest, XGBoost, LightGBM, gradient boosting, plus a top-3 soft-voting stack) with walk-forward CV, a validation-tuned threshold, and percentile bootstrap CIs. Two leakage corrections were resolved during the build (the terminal-vs-submit feature-source leak `V35`, and a split realignment to the instance-keyed group split); the tuned model zoo then met the >0.90 target at early-runtime (random forest MCC ~0.95, `V36`), with the formal one-sided CI test and the model-agnostic tuning ceiling recorded in `V37`. Sections 8 to 10 add Optuna / walk-forward-grid tuning to `configs/models/`, checkpointing of the best ensemble per prediction point (with a metadata sidecar), and the artifact and hypothesis-test outputs; the wrappers, metrics, and tests are extracted to `src/models/ensemble.py`, `src/evaluation/metrics.py`, and `src/evaluation/hypothesis.py`. Writes `outputs/tables/rq1_google.csv`.
+
+### `13_rq2_conflict.py`
+
+RQ2 conflict resolution. Builds labeled conflict episodes via `src/features/conflict_labels.py` over three conflict types (resource contention, priority inversion, scheduling violations) from two working-set scopes (machine-scoped for contention and inversion, preserving co-residency; collection-scoped for violations), with detection-time features only and a failure-based `resolution_outcome`. Trains a model zoo (logistic regression, decision tree, linear SVM, the random forest reused from `ensemble.py`, a one-hidden-layer Keras NN, and a most-frequent baseline) per conflict type plus pooled, splitting by the conflict entity (`group_key`) so no entity straddles train and test, with imputation and SMOTE training-only and a validation-tuned threshold. Scores with the `metrics.py` CI helpers and tests the >0.80 MCC target with `hypothesis.py`. On honest within-type evaluation, priority inversion meets the target (driven by strictly-prior resubmission history) while resource contention and scheduling violations do not; the pooled number is a between-type-prevalence artifact. Writes `outputs/tables/rq2_results.csv` and `outputs/tables/rq2_hypothesis_test.csv` (`V38` to `V40`). The Decision Tree / SVM / Keras wrappers are extracted to `src/models/classifier.py`.
+
+### `14_rq3_leadtime_google.py`
+
+RQ3 lead time (Google). Reuses the RQ1 at-submission checkpoint (`rq1_google_best_atsubmission`) on the RQ1 instance-grouped test split, scoring at its tuned threshold for ranking rather than as a calibrated probability (calibration is deferred to RQ4). Computes per-attempt lead time (submission to terminal) and aggregates member scores to the collection level (max / mean / top-3 mean) with an MCC-optimal threshold search, testing both against the 15-minute target. Failure discrimination is strong (collection MCC up to 0.87) but realizable lead time is only seconds to a few minutes, short of 15 minutes, because Google failures are rapid-onset crashes; the target is met instead on Backblaze's gradual degradation (`V41`). Writes `outputs/tables/rq3_google.csv` and `outputs/tables/rq3_google_hypothesis_test.csv`.
 
 ### Remaining Phase 4 onward (planned)
 
-Notebooks 13 through 19 cover the remaining RQ models, online-learning drift simulation, hypothesis testing, ablation, and the Chapter 4 tables/figures regeneration pipeline. Each will get its own narrative-first treatment, with logic moving into `src/` only after the notebook validates it.
+Notebooks 15 through 19 cover RQ4 resource optimization, the RQ5 online-learning drift simulation, hypothesis testing, the feature ablation, and the Chapter 4 tables/figures regeneration pipeline. Each will get its own narrative-first treatment, with logic moving into `src/` only after the notebook validates it.
 
 ## Conventions
 

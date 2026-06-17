@@ -1,6 +1,6 @@
-# `tests/` — Test Suite
+# `tests/` - Test Suite
 
-Pytest test suite for the extracted `src/` modules. Synthetic Polars LazyFrame fixtures hand-crafted to hit each branch. No BigQuery, no Drive, no GCS. Fast: the Phase 3 suite runs in under a second on a laptop.
+Pytest test suite for the extracted `src/` modules. Synthetic Polars LazyFrame fixtures hand-crafted to hit each branch. No BigQuery, no Drive, no GCS. Fast: the full suite runs in a few seconds on a laptop. The TensorFlow-dependent neural-network tests skip automatically when TensorFlow is absent (they run in Colab), as do the XGBoost / LightGBM wrapper tests when those libraries are not installed locally.
 
 ## Running
 
@@ -9,7 +9,7 @@ Pytest test suite for the extracted `src/` modules. Synthetic Polars LazyFrame f
 pytest tests/ -v
 ```
 
-A successful Phase 3 run reports 28 passing tests across five files:
+The suite is 81 tests across nine files (locally 72 pass and 9 skip where TensorFlow / XGBoost / LightGBM are absent; all run in Colab):
 
 ```
 tests/test_smoke.py              2 tests
@@ -17,6 +17,10 @@ tests/test_preprocessing.py      9 tests
 tests/test_lifecycle.py          7 tests
 tests/test_episodes.py           6 tests
 tests/test_sampling.py           4 tests
+tests/test_metrics.py           10 tests
+tests/test_hypothesis.py        17 tests
+tests/test_ensemble.py          15 tests
+tests/test_classifier.py        11 tests
 ```
 
 To run a single file: `pytest tests/test_preprocessing.py -v`. To run a single test: `pytest tests/test_preprocessing.py::test_failure_label_primary -v`.
@@ -73,11 +77,26 @@ Four unit tests for `src/features/sampling.py` (`P01`). Synthetic instance-event
 - Target-exceeds-population path: when the target dwarfs the data, the full population is kept (the behavior the 35.1M eligible Google population actually triggers).
 - `build_working_set_sql` renders with balanced parentheses, the unconditional failure-retention branch, and the stratified prefix selection.
 
+### `test_metrics.py` (Phase 4)
+
+Ten tests for `src/evaluation/metrics.py`: the closed-form MCC / F1 against scikit-learn, the stratified bootstrap returning `(point, ci_low, ci_high)` with the point matching the direct computation, the single-class degenerate path returning NaN bounds, PR-AUC / ROC-AUC / Brier on synthetic predictions, and the `calibration_table` bin structure and observed-versus-predicted columns.
+
+### `test_hypothesis.py` (Phase 4)
+
+Seventeen tests for `src/evaluation/hypothesis.py`: the reject / fail / boundary / less-is-better cases of `one_sample_threshold_test`, paired Wilcoxon on identical and consistently-different folds plus the length-mismatch guard, analytic Cohen's d, hand-computed Holm-Bonferroni and Benjamini-Hochberg adjustments with input-order preservation, and a parity check against statsmodels' `multipletests`.
+
+### `test_ensemble.py` (Phase 4)
+
+Fifteen tests for `src/models/ensemble.py`: per-wrapper fit / predict / importance and save-load round-trips (XGBoost / LightGBM / Balanced Random Forest skipped if the library is absent), the Polars / NumPy boundary equivalence, the soft-voting stack (equal and weighted), XGBoost's auto `scale_pos_weight`, and the `build_wrapper` error path.
+
+### `test_classifier.py` (Phase 4)
+
+Eleven tests for `src/models/classifier.py`: fit / predict / importances and save-load round-trips for the Decision Tree and linear SVM, the Polars / NumPy / pandas boundary equivalence, a check that the SVM score is the unbounded decision function (not a [0, 1] probability), the Keras NN fit / predict / save-load and its `NotImplementedError` on feature importances (the three Keras tests skipped when TensorFlow is absent), and the factory error path plus registry completeness.
+
 ### Planned
 
 - `test_features.py` (Phase 3): Tier 1 / 2 / 3 feature derivations against synthetic LazyFrames.
-- `test_metrics.py` (Phase 4): MCC, F1, PR-AUC, bootstrap CIs against ground-truth synthetic predictions.
-- `test_hypothesis.py` (Phase 4): Holm-Bonferroni and Benjamini-Hochberg family-wise error control.
+- `test_conflict_labels.py` (Phase 4): the RQ2 labelers and the `prior_counts` strict-prior helper (currently validated by hand and in-notebook).
 - `test_drift_detectors.py` (Phase 7): ADWIN, Page-Hinkley, KS, PSI behavior under synthetic drift.
 
 ## Fixture conventions

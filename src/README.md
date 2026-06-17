@@ -1,4 +1,4 @@
-# `src/` — Extracted Modules
+# `src/` - Extracted Modules
 
 Modules in `src/` are extracted from notebooks after the notebook has validated the logic against the EDA-confirmed statistics. This is the second-stage of the "let the data shape the code" principle that governs the repository: notebooks come first because they capture the analytical narrative; `src/` modules exist to make that narrative reusable, testable, and committee-auditable.
 
@@ -9,7 +9,7 @@ src/
 ├── data/             Polars schemas, sentinel and priority constants, assertion helpers
 ├── preprocessing/    Per-event Polars transforms + BigQuery-backed lifecycle reconstruction
 ├── features/         Tier 1 / 2 / 3 feature engineering, working-set sampler (Phase 3)
-├── models/           Ensemble training, online learners (Phase 4 onward)
+├── models/           Ensemble training, conflict classifiers, online learners (Phase 4 onward)
 └── evaluation/       Metrics, bootstrap confidence intervals, hypothesis tests (Phase 4 onward)
 ```
 

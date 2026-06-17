@@ -1,4 +1,4 @@
-# `src/preprocessing/` — Per-Event Transforms and Lifecycle Reconstruction
+# `src/preprocessing/` - Per-Event Transforms and Lifecycle Reconstruction
 
 Two modules:
 

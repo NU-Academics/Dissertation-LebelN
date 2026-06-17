@@ -1,4 +1,4 @@
-# `utils/` — Shared Session and I/O Helpers
+# `utils/` - Shared Session and I/O Helpers
 
 Minimal shared utilities. Three modules, all small enough to read in one sitting.
 

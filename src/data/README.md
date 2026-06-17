@@ -1,4 +1,4 @@
-# `src/data/` — Schemas, Constants, and Assertions
+# `src/data/` - Schemas, Constants, and Assertions
 
 Two modules:
 
