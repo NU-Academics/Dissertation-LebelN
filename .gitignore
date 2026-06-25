@@ -58,6 +58,7 @@ outputs/optuna/*
 !outputs/tables/.gitkeep
 !outputs/figures/.gitkeep
 !outputs/tables/eda_decisions.csv
+!outputs/tables/google_block/*
 
 # Scratch: local notes only, not committed
 scratch/
