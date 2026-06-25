@@ -1,0 +1,3 @@
+model,subset,test_mcc
+lightgbm,first_episode_static,0.6746266241517209
+random_forest,first_episode_static,0.707311081458962

@@ -1,0 +1,16 @@
+feature_set,n_features,metric,value,ci_low,ci_high,threshold
+tier1_no_history,15,mcc,0.8135,0.8108,0.816,0.6715
+tier1_no_history,15,f1,0.8491,0.8469,0.8512,0.6715
+tier1_no_history,15,pr_auc,0.9291,0.9277,0.9305,0.6715
+tier1,20,mcc,0.9153,0.9135,0.9172,0.7402
+tier1,20,f1,0.9318,0.9303,0.9333,0.7402
+tier1,20,pr_auc,0.9749,0.9741,0.9756,0.7402
+tier1_tier2,31,mcc,0.9497,0.9483,0.951,0.7134
+tier1_tier2,31,f1,0.9601,0.959,0.9612,0.7134
+tier1_tier2,31,pr_auc,0.9903,0.9899,0.9908,0.7134
+all_tiers,49,mcc,0.9687,0.9677,0.9699,0.5387
+all_tiers,49,f1,0.9756,0.9748,0.9765,0.5387
+all_tiers,49,pr_auc,0.9964,0.9962,0.9966,0.5387
+tier2_missingness_only,11,mcc,0.2679,0.2636,0.2724,0.8723
+tier2_missingness_only,11,f1,0.2545,0.2504,0.2587,0.8723
+tier2_missingness_only,11,pr_auc,0.3845,0.3815,0.3876,0.8723

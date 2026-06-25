@@ -1,0 +1,5 @@
+split,features,n_features,test_mcc_tuned,test_mcc_at_0.5
+temporal,submission_only,15,0.5954947898060294,0.6124871840104381
+temporal,submission_plus_history,20,0.9130407292833534,0.9087437338034077
+group,submission_only,15,0.8010536996938478,0.8000699816345729
+group,submission_plus_history,20,0.9133465348151236,0.9135187320803149

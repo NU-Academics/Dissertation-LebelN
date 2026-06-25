@@ -1,0 +1,4 @@
+prediction_point,model,metric,value,ci_low,ci_high,threshold_target,reject_h0,decision,margin,narrative
+at_submission,soft_voting_top3[random_forest+balanced_random_forest+lightgbm],mcc,0.9006,0.8988,0.9026,0.9,false,fail to reject H0,-0.0012,"MCC = 0.9006 (CI [0.8988, 0.9026]); the CI lower bound 0.8988 does not exceed the 0.9 target, so H0 (MCC <= 0.9) is not rejected at alpha = 0.05 (one-sided)."
+at_scheduling,balanced_random_forest,mcc,0.9024,0.9004,0.9043,0.9,true,reject H0,0.0004,"MCC = 0.9024 (CI [0.9004, 0.9043]); the CI lower bound 0.9004 exceeds the 0.9 target, so H0 (MCC <= 0.9) is rejected at alpha = 0.05 (one-sided)."
+early_runtime,random_forest,mcc,0.9476,0.9463,0.9491,0.9,true,reject H0,0.0463,"MCC = 0.9476 (CI [0.9463, 0.9491]); the CI lower bound 0.9463 exceeds the 0.9 target, so H0 (MCC <= 0.9) is rejected at alpha = 0.05 (one-sided)."

@@ -1,0 +1,5 @@
+level,aggregation,lead_median_min,ci_low,ci_high,threshold_target_min,reject_h0,decision,margin,collection_mcc
+attempt,none,3.448,3.296,3.62,15.0,false,fail to reject H0,-11.704,
+collection,max,0.511,0.502,0.52,15.0,false,fail to reject H0,-14.498,0.8705
+collection,mean,0.512,0.503,0.521,15.0,false,fail to reject H0,-14.497,0.8345
+collection,top3_mean,0.511,0.502,0.52,15.0,false,fail to reject H0,-14.498,0.8678

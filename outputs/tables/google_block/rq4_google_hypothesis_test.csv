@@ -1,0 +1,4 @@
+strategy,target_improvement,median_improvement,ci_low,ci_high,wilcoxon_p,reject_h0,decision,test_brier_raw,test_brier_calibrated,infer_us_per_submission,reclaimed_alloc_fraction
+preemptive_migration,0.25,0.0693,0.0525,0.0878,0.9999912940975885,false,fail to reject H0 (no detected difference),0.10672,0.03583,200.027,0.1964
+admission_control,0.25,0.0643,0.0519,0.0816,0.9999955707359103,false,fail to reject H0 (no detected difference),0.10672,0.03583,200.027,0.1964
+capacity_aware_bin_packing,0.25,0.0153,0.0123,0.0185,1.0,false,fail to reject H0 (no detected difference),0.10672,0.03583,200.027,0.1964

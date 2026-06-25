@@ -1,0 +1,5 @@
+scope,model,metric,value,ci_low,ci_high,threshold_target,reject_h0,decision,margin
+pooled,keras_nn,mcc,0.8583,0.8468,0.869,0.8,true,reject H0,0.0468
+resource_contention,random_forest,mcc,0.5999,0.5722,0.6295,0.8,false,fail to reject H0,-0.2278
+priority_inversion,decision_tree,mcc,0.8622,0.8108,0.9068,0.8,true,reject H0,0.0108
+scheduling_violation,random_forest,mcc,-0.0036,-0.0786,0.0644,0.8,false,fail to reject H0,-0.8786

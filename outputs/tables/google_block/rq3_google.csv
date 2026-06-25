@@ -1,0 +1,8 @@
+level,aggregation,metric,value,ci_low,ci_high
+attempt,none,lead_time_min,3.448,3.296,3.62
+collection,max,mcc,0.8705,0.8644,0.8771
+collection,max,lead_time_min,0.511,0.502,0.52
+collection,mean,mcc,0.8345,0.8276,0.8423
+collection,mean,lead_time_min,0.512,0.503,0.521
+collection,top3_mean,mcc,0.8678,0.8616,0.874
+collection,top3_mean,lead_time_min,0.511,0.502,0.52

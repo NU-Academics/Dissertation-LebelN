@@ -1,0 +1,16 @@
+feature,single_feature_test_mcc
+cpu_request,0.4643574012862445
+memory_request,0.5213780426463419
+request_ratio,0.4152626273166993
+priority_tier_best_effort,0.3667572144756114
+priority_tier_free,0.0
+priority_tier_mid,0.20347500761159137
+priority_tier_monitoring,0.0
+priority_tier_production,0.5354808154294606
+scheduling_class,0.47221800290728627
+submit_day_of_week,0.0486637954698264
+submit_hour_cos,0.2704980461323709
+submit_hour_of_day,0.27914223380595937
+submit_hour_sin,0.09814455700191191
+submit_is_business_hours_pdt,0.27489719568433346
+submit_is_weekend,0.010421572866331531

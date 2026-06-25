@@ -1,0 +1,5 @@
+model,features,n_features,test_mcc
+lightgbm,submission_conservative,15,0.7749816841462073
+lightgbm,submission_plus_history,20,0.8917854360267659
+random_forest,submission_conservative,15,0.7569089874815835
+random_forest,submission_plus_history,20,0.8989825433370078
