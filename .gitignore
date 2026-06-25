@@ -54,11 +54,13 @@ outputs/figures/*
 outputs/preprocessed/*
 outputs/features/*
 outputs/optuna/*
+
 !outputs/.gitkeep
+!outputs/tables
 !outputs/tables/.gitkeep
+!outputs/tables/google_block/
+!outputs/tables/google_block/**
 !outputs/figures/.gitkeep
-!outputs/tables/eda_decisions.csv
-!outputs/tables/google_block/*
 
 # Scratch: local notes only, not committed
 scratch/
