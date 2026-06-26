@@ -1,6 +1,6 @@
 # `src/evaluation/` - Metrics, Confidence Intervals, Hypothesis Tests
 
-**Status:** `metrics.py` and `hypothesis.py` populated and unit-tested, and now consumed by the RQ1, RQ2, and RQ3 notebooks (`12` through `14`) for every reported metric and threshold test; `interpretability.py` remains planned. Reusable metric helpers landed early so the per-RQ notebooks share one canonical implementation of each metric. Modules are extracted from the per-RQ training notebooks (`12` through `16`) and the cross-cutting evaluation notebook (`17_hypothesis_testing.py`).
+**Status:** `metrics.py` and `hypothesis.py` populated and unit-tested, and now consumed by the RQ1 through RQ4 notebooks (`12` through `15`) and the feature ablation (`18`) for every reported metric and threshold test; the RQ4 notebook additionally uses `brier_score_with_ci` and `calibration_table` for the at-submission probability calibration and `paired_wilcoxon_cv` for the 25% efficiency-improvement test. `interpretability.py` remains planned. Reusable metric helpers landed early so the per-RQ notebooks share one canonical implementation of each metric. Modules are extracted from the per-RQ training notebooks (`12` through `16`) and the cross-cutting evaluation notebook (`17_hypothesis_testing.py`).
 
 ## Modules
 

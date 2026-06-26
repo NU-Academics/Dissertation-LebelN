@@ -2,7 +2,7 @@
 
 Jupytext percent-format `.py` files are the primary work product. Each notebook captures the analytical narrative for one CRISP-DM step and produces the artifacts that downstream notebooks and `src/` modules depend on. `.ipynb` files are generated on demand in Colab and are gitignored.
 
-The decisions audit trail at `outputs/tables/eda_decisions.csv` is the canonical cross-reference for every validated analytical choice (rows `V01` through `V41` at the time of writing, plus the `P` planned and `O` open / resolved rows). When a notebook section references a decision by ID, the CSV is where to read the evidence and the next step.
+The decisions audit trail at `outputs/tables/eda_decisions.csv` is the canonical cross-reference for every validated analytical choice (rows `V01` through `V43` at the time of writing, plus the `P` planned and `O` open / resolved rows). When a notebook section references a decision by ID, the CSV is where to read the evidence and the next step.
 
 ## Phase 2: Data Understanding (complete)
 
@@ -79,7 +79,7 @@ Characterizes the attempt/episode structure of the event stream before the redes
 
 `09_backblaze_preprocessing.py` and `10_feature_engineering_backblaze.py` are the next preprocessing-and-feature notebooks.
 
-## Phase 4: Modeling (RQ1 to RQ3 Google complete)
+## Phase 4: Modeling (Google block complete)
 
 ### `12_rq1_ensemble_google.py`
 
@@ -93,9 +93,17 @@ RQ2 conflict resolution. Builds labeled conflict episodes via `src/features/conf
 
 RQ3 lead time (Google). Reuses the RQ1 at-submission checkpoint (`rq1_google_best_atsubmission`) on the RQ1 instance-grouped test split, scoring at its tuned threshold for ranking rather than as a calibrated probability (calibration is deferred to RQ4). Computes per-attempt lead time (submission to terminal) and aggregates member scores to the collection level (max / mean / top-3 mean) with an MCC-optimal threshold search, testing both against the 15-minute target. Failure discrimination is strong (collection MCC up to 0.87) but realizable lead time is only seconds to a few minutes, short of 15 minutes, because Google failures are rapid-onset crashes; the target is met instead on Backblaze's gradual degradation (`V41`). Writes `outputs/tables/rq3_google.csv` and `outputs/tables/rq3_google_hypothesis_test.csv`.
 
+### `15_rq4_optimization.py`
+
+RQ4 resource optimization. Compares a reactive baseline against three prediction-informed proactive strategies (preemptive migration, admission control, capacity-aware bin packing) over rolling temporal windows in the held-out test period, scoring with the at-submission ensemble after post-hoc calibration. The calibration stage fits isotonic calibration on the RQ1 validation split (test Brier 0.107 to 0.036, closing the probability-calibration item deferred from RQ1) and drives the probability-based strategies with the calibrated scores. Efficiency is `sum(used CPU) / sum(allocated CPU request)` at the scheduled-episode grain. All three strategies fall short of the 25% improvement target (median per-window improvement 1.5% to 6.9%, one-sided Wilcoxon), because only about 18 to 20% of allocation is failure-bound and failing jobs already consume near-zero CPU; the dominant inefficiency is over-provisioning by successful jobs, which failure prediction does not address. Writes `outputs/tables/rq4_google.csv` and `outputs/tables/rq4_google_hypothesis_test.csv` (`V42`).
+
+### `18_feature_ablation_google.py`
+
+Google feature-tier ablation (the Google portion of the cross-cutting ablation notebook). Trains one LightGBM (`src/models/ensemble.py::LightGBMWrapper`) with identical hyperparameters across five feature sets on the RQ1 instance-keyed group split, tuning the threshold on validation and reporting MCC, F1, and PR-AUC with bootstrap CIs on test. At the episode grain: a scheduling-plus-temporal floor (MCC 0.813), plus strictly-prior history (0.915, the dominant incremental lever), plus early-runtime Tier 2 (0.950), plus windowed-utilization Tier 3 (0.969); a Tier 2 null-indicator-only model scores 0.268, showing Tier 2's value is the slope and ramp magnitudes rather than null-as-signal alone. Confirms the `V13` tier hierarchy. Writes `outputs/tables/google_feature_ablation.csv`.
+
 ### Remaining Phase 4 onward (planned)
 
-Notebooks 15 through 19 cover RQ4 resource optimization, the RQ5 online-learning drift simulation, hypothesis testing, the feature ablation, and the Chapter 4 tables/figures regeneration pipeline. Each will get its own narrative-first treatment, with logic moving into `src/` only after the notebook validates it.
+The remaining notebooks cover the Backblaze modeling block (RQ1 multi-horizon and RQ3), the RQ5 online-learning drift simulation (notebook 16), cross-cutting hypothesis testing (notebook 17), the Backblaze portion of the feature ablation, and the Chapter 4 tables/figures regeneration pipeline (notebook 19). Each will get its own narrative-first treatment, with logic moving into `src/` only after the notebook validates it.
 
 ## Conventions
 
