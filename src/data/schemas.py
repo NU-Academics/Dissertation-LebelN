@@ -1,4 +1,4 @@
-"""Polars schemas, sentinel constants, and priority-tier bands.
+"""Polars schemas, sentinel constants, priority-tier bands, and Backblaze eras.
 
 Schemas describe the cached BigQuery tables in
 ``{project}.dissertation_lebel.*_full`` as inspected in notebook 02 and
@@ -80,6 +80,44 @@ FINISH_TYPE: int = EVENT_FINISH
 TERMINAL_TYPES: tuple[int, ...] = (
     EVENT_EVICT, EVENT_FAIL, EVENT_FINISH, EVENT_KILL, EVENT_LOST,
 )
+
+
+# ---------------------------------------------------------------------------
+# Backblaze SMART schema eras.
+#
+# The Backblaze SMART schema is not stable across 2013-2025. The per-quarter
+# availability census (notebook 07c;
+# outputs/tables/backblaze_schema_era_census.csv) covers 681,749,417 drive-day
+# rows, 93 distinct SMART IDs, and 51 quarters (2013Q2-2025Q4). Availability is
+# the non-null fraction at the drive-day grain on the ``smart_{id}_raw``
+# columns. Agglomerative clustering of the per-quarter availability vectors,
+# collapsed into contiguous runs at a 50% presence threshold, yields three eras.
+#
+# Each entry is ``(start_date, end_date, era_name, available_smart_ids)`` with
+# inclusive ISO day bounds; ``available_smart_ids`` lists the SMART IDs present
+# at or above the threshold in a majority of the era's quarters. Notable facts
+# the constants encode: the literature-standard SMART 187 and 188 are confined
+# to the middle era (dropped from 2021Q2 onward, not retained); the top
+# predictors 197 and 5 span all three eras, while 198 is absent from the early
+# era. Within-era availability still wobbles, so preprocessing pairs era
+# assignment with per-column availability indicators rather than relying on era
+# alone. These constants gate the Backblaze column-drop, availability-indicator,
+# and conditional-inclusion decisions. See the era-census row in
+# outputs/tables/eda_decisions.csv.
+# ---------------------------------------------------------------------------
+BACKBLAZE_ERAS: list[tuple[str, str, str, tuple[int, ...]]] = [
+    ("2013-04-01", "2014-03-31", "early_2013_2014", (1, 5, 9, 194, 197)),
+    (
+        "2014-04-01", "2021-03-31", "standard_2014_2021",
+        (1, 3, 4, 5, 7, 9, 10, 12, 187, 188, 190, 192, 193, 194, 197, 198, 199,
+         240, 241, 242),
+    ),
+    (
+        "2021-04-01", "2025-12-31", "recent_2021_2025",
+        (1, 2, 3, 4, 5, 7, 8, 9, 10, 12, 192, 193, 194, 196, 197, 198, 199,
+         240, 241, 242),
+    ),
+]
 
 
 # ---------------------------------------------------------------------------
