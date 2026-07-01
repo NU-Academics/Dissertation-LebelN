@@ -12,6 +12,8 @@ LazyFrame functions, no I/O.
 
 from __future__ import annotations
 
+from datetime import date
+
 import polars as pl
 
 from src.data.schemas import (
@@ -266,3 +268,180 @@ def assert_row_count(
             f"[{expected_min:,}, {expected_max:,}]."
         )
     return observed
+
+
+# ---------------------------------------------------------------------------
+# Backblaze post-preprocessing assertions.
+#
+# Regression guards for the Backblaze cleaning pass (notebook 09). Anchored to
+# the Phase 2 EDA statistics (notebooks 05 / 06) and the schema-evolution
+# census (notebook 07c): the failure-event count, the one-observation-per-
+# drive-per-day grain, complete era assignment, and the multi-year fleet
+# expansion that grounds the drift analysis.
+# ---------------------------------------------------------------------------
+def assert_failure_event_count(
+    lf: pl.LazyFrame,
+    expected: int = 31_062,
+    tolerance: int = 0,
+    failure_column: str = "failure",
+) -> int:
+    """Assert the count of failure events survives preprocessing.
+
+    The Phase 2 EDA established 31,062 HDD failure events. After SSD exclusion
+    and cleaning the count must be preserved (no failures dropped). The
+    tolerance allows for a documented SSD-failure removal when the caller knows
+    a small number of failures belonged to excluded SSD models.
+
+    Args:
+        lf: preprocessed Backblaze LazyFrame with a binary failure column.
+        expected: target failure-event count (default 31,062 per notebook 05).
+        tolerance: absolute tolerance in event counts (default 0, exact).
+        failure_column: name of the binary failure column.
+
+    Returns:
+        The observed failure-event count.
+
+    Raises:
+        AssertionFailedError: when the observed count is outside tolerance.
+    """
+    observed = int(
+        lf.select((pl.col(failure_column) == 1).sum().alias("n")).collect().item()
+    )
+    if abs(observed - expected) > tolerance:
+        raise AssertionFailedError(
+            f"assert_failure_event_count: observed {observed:,} failures, "
+            f"expected {expected:,} +/- {tolerance:,}."
+        )
+    return observed
+
+
+def assert_one_row_per_drive_day(
+    lf: pl.LazyFrame,
+    serial_column: str = "serial_number",
+    date_column: str = "date",
+) -> int:
+    """Assert exactly one observation per ``(serial_number, date)`` pair.
+
+    The dataset records one row per drive per day. Duplicate pairs would
+    corrupt every per-drive rolling and lag feature, so this guard runs after
+    deduplication.
+
+    Args:
+        lf: preprocessed Backblaze LazyFrame.
+        serial_column: per-drive identifier column.
+        date_column: observation-date column.
+
+    Returns:
+        The number of duplicated ``(serial, date)`` pairs (0 on success).
+
+    Raises:
+        AssertionFailedError: when any pair appears more than once.
+    """
+    n_dupe = int(
+        lf.group_by([serial_column, date_column])
+        .agg(pl.len().alias("n"))
+        .filter(pl.col("n") > 1)
+        .select(pl.len())
+        .collect()
+        .item()
+    )
+    if n_dupe > 0:
+        raise AssertionFailedError(
+            f"assert_one_row_per_drive_day: {n_dupe:,} duplicated "
+            f"({serial_column}, {date_column}) pairs found; expected 0."
+        )
+    return n_dupe
+
+
+def assert_era_assignment_complete(
+    lf: pl.LazyFrame,
+    era_column: str = "era",
+    unknown_label: str = "unknown",
+    max_unknown: int = 0,
+) -> int:
+    """Assert every row received a known schema era.
+
+    The census covers 2013Q2 to 2025Q4, so a cleaned row whose date falls
+    outside every era range (label ``unknown`` or null) signals a date outside
+    the expected window or a boundary error. Any such row should be triaged
+    before feature engineering.
+
+    Args:
+        lf: Backblaze LazyFrame after era assignment.
+        era_column: name of the era label column.
+        unknown_label: the sentinel label for out-of-range dates.
+        max_unknown: maximum tolerated unknown/null rows (default 0).
+
+    Returns:
+        The observed count of unknown/null era rows.
+
+    Raises:
+        AssertionFailedError: when the count exceeds ``max_unknown``.
+    """
+    observed = int(
+        lf.select(
+            (
+                pl.col(era_column).is_null()
+                | (pl.col(era_column) == unknown_label)
+            ).sum().alias("n")
+        )
+        .collect()
+        .item()
+    )
+    if observed > max_unknown:
+        raise AssertionFailedError(
+            f"assert_era_assignment_complete: {observed:,} rows have an "
+            f"unknown/null era; expected at most {max_unknown:,}."
+        )
+    return observed
+
+
+def assert_fleet_expansion(
+    lf: pl.LazyFrame,
+    cutoff_date: str = "2020-01-01",
+    serial_column: str = "serial_number",
+    date_column: str = "date",
+) -> tuple[int, int]:
+    """Assert the fleet expands across the monitoring period.
+
+    The Phase 2 EDA documented a roughly 45-fold fleet expansion, with the peak
+    fleet in the most recent years. This guard confirms preprocessing did not
+    silently truncate the recent, high-volume period: the count of distinct
+    drives observed on or after ``cutoff_date`` must exceed the count before it.
+
+    Args:
+        lf: preprocessed Backblaze LazyFrame.
+        cutoff_date: ISO date splitting the early and recent periods.
+        serial_column: per-drive identifier column.
+        date_column: observation-date column.
+
+    Returns:
+        Tuple ``(distinct_before, distinct_after)``.
+
+    Raises:
+        AssertionFailedError: when the recent period does not exceed the early
+            period.
+    """
+    cutoff = date.fromisoformat(cutoff_date)
+    counts = (
+        lf.select(
+            pl.col(serial_column)
+            .filter(pl.col(date_column) < cutoff)
+            .n_unique()
+            .alias("before"),
+            pl.col(serial_column)
+            .filter(pl.col(date_column) >= cutoff)
+            .n_unique()
+            .alias("after"),
+        )
+        .collect()
+        .to_dicts()[0]
+    )
+    before = int(counts["before"])
+    after = int(counts["after"])
+    if not (after > before):
+        raise AssertionFailedError(
+            f"assert_fleet_expansion: distinct drives after {cutoff_date} "
+            f"({after:,}) should exceed those before ({before:,})."
+        )
+    return before, after

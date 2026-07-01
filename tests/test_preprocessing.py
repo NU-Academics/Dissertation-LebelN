@@ -10,10 +10,13 @@ Run with::
 
 from __future__ import annotations
 
+from datetime import date
+
 import polars as pl
 import pytest
 
 from src.data.schemas import (
+    BACKBLAZE_ERAS,
     EVENT_EVICT,
     EVENT_FAIL,
     EVENT_FINISH,
@@ -24,6 +27,21 @@ from src.data.schemas import (
     PRIORITY_PRODUCTION_LOW,
     SENTINEL_TIME_AFTER,
     SENTINEL_TIME_BEFORE,
+)
+from src.data.validation import (
+    AssertionFailedError,
+    assert_era_assignment_complete,
+    assert_failure_event_count,
+    assert_fleet_expansion,
+    assert_one_row_per_drive_day,
+)
+from src.preprocessing.backblaze import (
+    assign_era,
+    canonicalize_drive_model,
+    encode_smart_availability_indicators,
+    filter_hdds_only,
+    mark_censoring,
+    reconcile_smart_schema,
 )
 from src.preprocessing.google_traces import (
     apply_failure_label,
@@ -341,3 +359,243 @@ def test_mnar_indicators_opt_in_skips_majority_column() -> None:
     assert "has_cpi_value" in result.columns
     assert "has_mapi_value" in result.columns
     assert "has_hardware_counters_majority" not in result.columns
+
+
+# ---------------------------------------------------------------------------
+# Backblaze preprocessing (V14-V19, the schema-era census, V44)
+#
+# A single synthetic fixture spans all three SMART schema eras and both
+# HDD and SSD models. SMART 187 is populated only on the standard-era rows so
+# the availability indicator and the era gating can be exercised.
+# ---------------------------------------------------------------------------
+
+
+_SSD_MODELS = frozenset({"Samsung SSD 850 EVO"})
+
+
+def _backblaze_fixture() -> pl.LazyFrame:
+    """Drive-day rows across the three eras plus an SSD drive to exclude.
+
+    - ZHDD3 (Toshiba), 2 days in the early era (2013), healthy.
+    - ZHDD1 (Seagate), 3 days in the standard era (2014), fails on its last day.
+    - ZHDD2 (HGST), 2 days in the recent era (2022), healthy (censored).
+    - ZSSD1 (Samsung SSD), 2 days in the recent era, to be filtered out.
+
+    smart_187_raw is non-null only on the standard-era rows; smart_5_raw,
+    smart_5_normalized, and smart_197_raw are populated throughout.
+    """
+    dates = [
+        date(2013, 5, 1), date(2013, 5, 2),                       # ZHDD3 early
+        date(2014, 5, 1), date(2014, 5, 2), date(2014, 5, 3),     # ZHDD1 standard
+        date(2022, 6, 1), date(2022, 6, 2),                       # ZHDD2 recent
+        date(2022, 6, 1), date(2022, 6, 2),                       # ZSSD1 recent SSD
+    ]
+    serials = [
+        "ZHDD3", "ZHDD3",
+        "ZHDD1", "ZHDD1", "ZHDD1",
+        "ZHDD2", "ZHDD2",
+        "ZSSD1", "ZSSD1",
+    ]
+    models = [
+        "TOSHIBA MG07ACA14TA", "TOSHIBA MG07ACA14TA",
+        "ST4000DM000", "ST4000DM000", "ST4000DM000",
+        "HGST HMS5C4040BLE640", "HGST HMS5C4040BLE640",
+        "Samsung SSD 850 EVO", "Samsung SSD 850 EVO",
+    ]
+    failure = [0, 0, 0, 0, 1, 0, 0, 0, 0]
+    smart_187_raw: list[float | None] = [
+        None, None,
+        100.0, 100.0, 100.0,
+        None, None,
+        None, None,
+    ]
+    n = len(dates)
+    return pl.LazyFrame(
+        {
+            "date": dates,
+            "serial_number": serials,
+            "model": models,
+            "failure": failure,
+            "smart_5_raw": [0.0] * n,
+            "smart_5_normalized": [100.0] * n,
+            "smart_197_raw": [0.0] * n,
+            "smart_187_raw": smart_187_raw,
+        }
+    )
+
+
+def test_filter_hdds_only_removes_ssd_models() -> None:
+    """SSD model rows are dropped; HDD rows survive intact."""
+    result = filter_hdds_only(_backblaze_fixture(), ssd_models=_SSD_MODELS).collect()
+    assert result.height == 7
+    assert "ZSSD1" not in result["serial_number"].to_list()
+    assert set(result["serial_number"].to_list()) == {"ZHDD1", "ZHDD2", "ZHDD3"}
+
+
+def test_filter_hdds_only_noop_without_models() -> None:
+    """No SSD list means no filtering (the caller asserts counts downstream)."""
+    result = filter_hdds_only(_backblaze_fixture()).collect()
+    assert result.height == 9
+
+
+def test_assign_era_bins_by_date() -> None:
+    """Each row gets the era whose inclusive date range contains its date."""
+    result = assign_era(_backblaze_fixture()).collect()
+    by_serial = (
+        result.group_by("serial_number")
+        .agg(pl.col("era").unique().alias("eras"))
+    )
+    eras = {
+        row["serial_number"]: row["eras"]
+        for row in by_serial.iter_rows(named=True)
+    }
+    assert eras["ZHDD3"] == ["early_2013_2014"]
+    assert eras["ZHDD1"] == ["standard_2014_2021"]
+    assert eras["ZHDD2"] == ["recent_2021_2025"]
+
+
+def test_assign_era_marks_out_of_range_unknown() -> None:
+    """A date before the census window is labeled ``unknown``."""
+    lf = pl.LazyFrame({"date": [date(2010, 1, 1)], "serial_number": ["X"]})
+    result = assign_era(lf).collect()
+    assert result["era"].to_list() == ["unknown"]
+
+
+def test_reconcile_smart_schema_adds_missing_columns() -> None:
+    """Missing SMART columns are added as all-null; present ones are kept."""
+    result = reconcile_smart_schema(
+        _backblaze_fixture(), smart_ids=(5, 197, 187, 188, 999)
+    ).collect()
+    # 188 and 999 were absent and must now exist (raw + normalized).
+    for col in ["smart_188_raw", "smart_188_normalized", "smart_999_raw",
+                "smart_999_normalized"]:
+        assert col in result.columns, f"{col} should be added"
+        assert result[col].null_count() == result.height, f"{col} should be all-null"
+    # A pre-existing column is untouched.
+    assert result["smart_5_raw"].null_count() == 0
+
+
+def test_encode_smart_availability_indicators_track_nullness() -> None:
+    """``has_smart_{id}`` is 1 where the raw column is non-null, else 0."""
+    lf = reconcile_smart_schema(_backblaze_fixture(), smart_ids=(187, 188))
+    result = encode_smart_availability_indicators(lf, smart_ids=(187, 188)).collect()
+    # 187 is populated only on the standard-era ZHDD1 rows (3 of 9).
+    assert result["has_smart_187"].sum() == 3
+    # 188 was reconciled to all-null, so its indicator is always 0.
+    assert result["has_smart_188"].sum() == 0
+
+
+def test_canonicalize_drive_model_derives_manufacturer() -> None:
+    """Manufacturer is read from the canonical model-name prefix."""
+    result = canonicalize_drive_model(_backblaze_fixture()).collect()
+    by_serial = {
+        row["serial_number"]: row["manufacturer"]
+        for row in result.select(["serial_number", "manufacturer"])
+        .unique()
+        .iter_rows(named=True)
+    }
+    assert by_serial["ZHDD1"] == "Seagate"
+    assert by_serial["ZHDD2"] == "HGST"
+    assert by_serial["ZHDD3"] == "Toshiba"
+    assert by_serial["ZSSD1"] == "Samsung"
+
+
+def test_canonicalize_drive_model_applies_aliases() -> None:
+    """An alias folds onto a canonical identity before manufacturer derivation."""
+    aliases = {"ST4000DM000": "ST4000DM000A"}
+    result = canonicalize_drive_model(_backblaze_fixture(), aliases=aliases).collect()
+    seagate = result.filter(pl.col("serial_number") == "ZHDD1")
+    assert seagate["model_canonical"].unique().to_list() == ["ST4000DM000A"]
+    assert seagate["manufacturer"].unique().to_list() == ["Seagate"]
+
+
+def test_mark_censoring_flags_terminal_observations() -> None:
+    """The last row per drive is an observed failure or a censoring event."""
+    hdd = filter_hdds_only(_backblaze_fixture(), ssd_models=_SSD_MODELS)
+    result = mark_censoring(hdd).collect()
+
+    # ZHDD1 fails on its last day: failure_observed on the 2014-05-03 row only.
+    z1 = result.filter(pl.col("serial_number") == "ZHDD1").sort("date")
+    assert z1["is_last_obs"].to_list() == [0, 0, 1]
+    assert z1["failure_observed"].to_list() == [0, 0, 1]
+    assert z1["censored"].to_list() == [0, 0, 0]
+
+    # ZHDD2 simply leaves the fleet: censored on its last day, never a failure.
+    z2 = result.filter(pl.col("serial_number") == "ZHDD2").sort("date")
+    assert z2["is_last_obs"].to_list() == [0, 1]
+    assert z2["failure_observed"].to_list() == [0, 0]
+    assert z2["censored"].to_list() == [0, 1]
+
+
+# ---------------------------------------------------------------------------
+# Backblaze post-preprocessing assertions (validation.py)
+# ---------------------------------------------------------------------------
+
+
+def test_assert_failure_event_count_pass_and_fail() -> None:
+    """The fixture carries exactly one failure event."""
+    lf = _backblaze_fixture()
+    assert assert_failure_event_count(lf, expected=1) == 1
+    with pytest.raises(AssertionFailedError, match="failures"):
+        assert_failure_event_count(lf, expected=5)
+
+
+def test_assert_one_row_per_drive_day_pass_and_fail() -> None:
+    """A unique grain passes; a duplicated pair raises."""
+    assert assert_one_row_per_drive_day(_backblaze_fixture()) == 0
+    dup = pl.LazyFrame(
+        {
+            "serial_number": ["A", "A"],
+            "date": [date(2022, 1, 1), date(2022, 1, 1)],
+        }
+    )
+    with pytest.raises(AssertionFailedError, match="duplicated"):
+        assert_one_row_per_drive_day(dup)
+
+
+def test_assert_era_assignment_complete_pass_and_fail() -> None:
+    """All known eras pass; an out-of-range date raises."""
+    ok = assign_era(filter_hdds_only(_backblaze_fixture(), ssd_models=_SSD_MODELS))
+    assert assert_era_assignment_complete(ok) == 0
+    bad = assign_era(pl.LazyFrame({"date": [date(2010, 1, 1)], "serial_number": ["X"]}))
+    with pytest.raises(AssertionFailedError, match="unknown"):
+        assert_era_assignment_complete(bad)
+
+
+def test_assert_fleet_expansion_pass_and_fail() -> None:
+    """Distinct drives after the cutoff must exceed those before it."""
+    growing = pl.LazyFrame(
+        {
+            "serial_number": ["A", "B", "C", "D", "E"],
+            "date": [
+                date(2016, 1, 1), date(2016, 1, 2),
+                date(2022, 1, 1), date(2022, 1, 2), date(2022, 1, 3),
+            ],
+        }
+    )
+    before, after = assert_fleet_expansion(growing, cutoff_date="2020-01-01")
+    assert (before, after) == (2, 3)
+
+    shrinking = pl.LazyFrame(
+        {
+            "serial_number": ["A", "B", "C", "D"],
+            "date": [
+                date(2016, 1, 1), date(2016, 1, 2), date(2016, 1, 3),
+                date(2022, 1, 1),
+            ],
+        }
+    )
+    with pytest.raises(AssertionFailedError, match="exceed"):
+        assert_fleet_expansion(shrinking, cutoff_date="2020-01-01")
+
+
+def test_backblaze_eras_constant_is_well_formed() -> None:
+    """BACKBLAZE_ERAS carries three eras with the expected 187/188 placement."""
+    assert len(BACKBLAZE_ERAS) == 3
+    names = [name for _s, _e, name, _ids in BACKBLAZE_ERAS]
+    assert names == ["early_2013_2014", "standard_2014_2021", "recent_2021_2025"]
+    # SMART 187/188 are confined to the standard era (V16, V44).
+    by_name = {name: set(ids) for _s, _e, name, ids in BACKBLAZE_ERAS}
+    assert {187, 188}.issubset(by_name["standard_2014_2021"])
+    assert 187 not in by_name["early_2013_2014"]
+    assert 187 not in by_name["recent_2021_2025"]
