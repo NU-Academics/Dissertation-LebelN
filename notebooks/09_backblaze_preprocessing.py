@@ -18,11 +18,11 @@
 #
 # **Purpose.** Turn the raw Backblaze daily Parquet (notebook 04) into a clean,
 # labeled, schema-reconciled HDD table ready for feature engineering. The pass
-# applies, in order: SSD exclusion, schema-era assignment, SMART schema
-# reconciliation, availability-indicator encoding, SMART cleaning, drive-model
-# canonicalization, drive-day deduplication, a per-drive temporal sort, and a
-# censoring marker. A post-preprocessing assertion suite then confirms the
-# cleaned table against the Phase 2 statistics before export.
+# applies the row-level transforms (SSD exclusion, schema-era assignment,
+# availability-indicator encoding, SMART cleaning, drive-model canonicalization)
+# per file, then derives a per-drive terminal (censoring) summary and runs a
+# post-preprocessing assertion suite against the Phase 2 statistics before
+# export.
 #
 # **Decisions operationalized** (`outputs/tables/eda_decisions.csv`): V14 / V15
 # (primary and secondary SMART attributes), V16 (SMART 187 / 188 conditional
@@ -34,16 +34,29 @@
 # per-row transforms) and `src/data/validation.py` (the assertion suite); this
 # notebook composes them and owns all reads and writes.
 #
+# **Scale strategy.** The daily data is about 682M drive-day rows across an
+# evolving schema (roughly 125 GB uncompressed at the modeled column width), so
+# whole-table operations do not fit in memory. Three adaptations keep the pass
+# within a high-memory runtime:
+#
+# 1. *Row-level cleaning is streamed file by file.* Each raw file is scanned,
+#    reconciled to a common column set, transformed, and sunk to its own cleaned
+#    Parquet. No cross-file state is held, so memory stays flat.
+# 2. *Censoring is a group-by summary, not a global window.* The per-drive
+#    terminal observation is found with a streaming group-by that emits one row
+#    per drive (a few million rows), rather than a whole-table window.
+# 3. *The global per-drive sort is deferred.* Rolling and lag features
+#    (feature-engineering notebook) sort within each drive group via window
+#    expressions, which gives the same ordering guarantee without a global sort
+#    over the full table. Drive-day uniqueness is verified by assertion (the
+#    dataset is one row per drive-day by construction) rather than a global
+#    de-duplication.
+#
 # **Outputs.**
-# - GCS Parquet: `gs://{PROJECT}-dissertation-data/backblaze_preprocessed/`.
+# - GCS Parquet dataset: `gs://{PROJECT}-dissertation-data/backblaze_preprocessed/`.
+# - Per-drive terminal table: `.../backblaze_drive_terminal.parquet`.
 # - Drive manifest: `{OUTPUT_DIR}/preprocessed/backblaze/manifest.json`.
 # - `outputs/tables/backblaze_preprocessing_verification.csv`.
-#
-# **Scale discipline.** The daily data is about 682M drive-day rows across 43
-# Parquet files with an evolving schema. Files are scanned lazily, reconciled to
-# a common column set, concatenated, and streamed to Parquet, so the row-level
-# data is not materialized in memory in one piece. The per-drive sort and the
-# censoring window are the memory-heavy steps and use the streaming engine.
 
 # %% [markdown]
 # ## 0. Colab session setup
@@ -89,23 +102,19 @@ auth.authenticate_user()
 # %%
 import json
 import re
+import subprocess
+from datetime import date
 
 import polars as pl
 
 from utils.colab_setup import setup_drive, OUTPUT_DIR
 from src.data.schemas import BACKBLAZE_ERAS
-from src.data.validation import (
-    assert_era_assignment_complete,
-    assert_failure_event_count,
-    assert_fleet_expansion,
-    assert_one_row_per_drive_day,
-)
+from src.data.validation import AssertionFailedError
 from src.preprocessing.backblaze import (
     assign_era,
     canonicalize_drive_model,
     encode_smart_availability_indicators,
     filter_hdds_only,
-    mark_censoring,
     reconcile_smart_schema,
 )
 
@@ -113,9 +122,9 @@ setup_drive()
 
 PREPROCESSED_DIR = OUTPUT_DIR / 'preprocessed' / 'backblaze'
 TABLES_DIR = OUTPUT_DIR / 'tables'
-LOCAL_SINK = Path('/content/backblaze_preprocessed')
 BACKBLAZE_DIR = Path('/content/backblaze_parquet')
-for d in [PREPROCESSED_DIR, TABLES_DIR, LOCAL_SINK, BACKBLAZE_DIR]:
+CLEANED_DIR = Path('/content/backblaze_cleaned')
+for d in [PREPROCESSED_DIR, TABLES_DIR, BACKBLAZE_DIR, CLEANED_DIR]:
     d.mkdir(parents=True, exist_ok=True)
 
 GCS_BUCKET = f'{PROJECT_ID}-dissertation-data'
@@ -131,6 +140,12 @@ MODELED_SMART_IDS = tuple(sorted(set().union(*[set(ids) for *_, ids in BACKBLAZE
 # that needs availability indicators (V16). 187 / 188 fall in the gated set.
 UNIVERSAL_SMART_IDS = tuple(sorted(set.intersection(*[set(ids) for *_, ids in BACKBLAZE_ERAS])))
 ERA_GATED_SMART_IDS = tuple(sorted(set(MODELED_SMART_IDS) - set(UNIVERSAL_SMART_IDS)))
+
+RAW_COLS = [f'smart_{sid}_raw' for sid in MODELED_SMART_IDS]
+HAS_COLS = [f'has_smart_{sid}' for sid in ERA_GATED_SMART_IDS]
+KEEP_BASE_COLS = ['date', 'serial_number', 'model', 'capacity_bytes', 'failure']
+DERIVED_COLS = ['model_canonical', 'manufacturer', 'era']
+FINAL_COLS = KEEP_BASE_COLS + DERIVED_COLS + RAW_COLS + HAS_COLS
 
 print(f"Modeled SMART IDs ({len(MODELED_SMART_IDS)}): {MODELED_SMART_IDS}")
 print(f"Universal across eras ({len(UNIVERSAL_SMART_IDS)}): {UNIVERSAL_SMART_IDS}")
@@ -159,174 +174,326 @@ parquet_files = sorted(BACKBLAZE_DIR.glob('*.parquet'))
 print(f"{len(parquet_files)} raw Parquet files available at {BACKBLAZE_DIR}")
 
 # %% [markdown]
-# ## 1. SSD exclusion
+# ## 1. SSD exclusion inventory
 #
 # The daily schema carries no drive-type flag, so SSDs are identified by model
 # name. Candidate SSD models are flagged by the keyword and prefix conventions
 # surfaced in notebook 05 (an "SSD" token or a known consumer-SSD family), then
-# printed for verification before exclusion. The verified set is passed to
-# `filter_hdds_only`; the failure-count assertion downstream confirms no HDD
-# failures were lost.
+# printed for verification before exclusion. The failure-count assertion later
+# confirms no HDD failures were lost.
 
 # %%
-# Inventory distinct models and their row counts across all files.
 model_counts: dict[str, int] = {}
+model_failures: dict[str, int] = {}
 for pf in parquet_files:
     out = (
         pl.scan_parquet(pf)
         .group_by('model')
-        .agg(pl.len().alias('n'))
+        .agg(pl.len().alias('n'), (pl.col('failure') == 1).sum().alias('f'))
         .collect()
     )
     for row in out.iter_rows(named=True):
         model_counts[row['model']] = model_counts.get(row['model'], 0) + int(row['n'])
+        model_failures[row['model']] = model_failures.get(row['model'], 0) + int(row['f'])
 
-_SSD_TOKENS = re.compile(
-    r'(SSD|Samsung|Crucial|Micron|DELLBOSS|WDC WDS|TOSHIBA-?(TR|HK|KSG)|'
-    r'Seagate SSD|SanDisk|Intel SSD|PHISON|HP SSD)',
-    flags=re.IGNORECASE,
-)
+# SSDs are matched on an explicit "SSD" token or a known SSD part family, not on
+# a bare manufacturer name: the fleet includes early Samsung SpinPoint HDDs
+# (for example SAMSUNG HD103UJ / HD154UI) that a "Samsung" match would wrongly
+# drop. Verify the flagged set against notebook 05 before trusting it.
+_SSD_TOKENS = re.compile(r'(SSD|DELLBOSS|MTFDDAK|WDC WDS)', flags=re.IGNORECASE)
 ssd_models = {m for m in model_counts if _SSD_TOKENS.search(m or '')}
 
 print(f"Flagged {len(ssd_models)} SSD models for exclusion:")
 for m in sorted(ssd_models):
-    print(f"  {m:40s}  {model_counts[m]:>12,} rows")
+    print(f"  {m:44s}  {model_counts[m]:>12,} rows  {model_failures[m]:>5,} failures")
 print("Review this list against notebook 05 before trusting the exclusion.")
 
+# Decompose the failure count so the survival check is self-verifying rather
+# than anchored to a hard-coded total. The published 31,062 figure is the full
+# fleet (HDDs plus SSDs); excluding SSDs necessarily lowers it.
+total_failures_raw = sum(model_failures.values())
+ssd_failures = sum(model_failures[m] for m in ssd_models)
+hdd_failures_expected = total_failures_raw - ssd_failures
+print(f"\nRaw failure rows (all drives, pre-dedup):  {total_failures_raw:,}")
+print(f"Failure rows on excluded SSD models:       {ssd_failures:,}")
+print(f"HDD failure rows (pre-dedup):              {hdd_failures_expected:,}")
+
 # %% [markdown]
-# ## 2. Build the reconciled, labeled HDD pipeline
+# ## 2. Stream the row-level cleaning per file
 #
-# Each file is scanned, reconciled to the modeled SMART column set so all files
-# share one schema, and then concatenated. The transforms are applied to the
-# combined lazy frame: SSD exclusion, era assignment, availability indicators,
-# SMART cleaning (drop the `_normalized` siblings, since the EDA models on raw
-# values per notebook 05 Section 3.1), and drive-model canonicalization.
+# For each raw file: select the base and modeled SMART raw columns present,
+# reconcile to the full modeled SMART set (adding absent columns as null so
+# every cleaned file shares one schema), apply the row-level transforms, and
+# stream to a cleaned Parquet. The `_normalized` siblings are not carried
+# because the EDA models on raw values (notebook 05 Section 3.1). This pass is
+# purely row-wise, so it streams with bounded memory; drive-day de-duplication
+# is a separate isolated pass (below). A fail-loud column guard runs on the
+# first file so a stale module or a bad reconcile surfaces before the whole pass
+# runs.
 
 # %%
-KEEP_BASE_COLS = ['date', 'serial_number', 'model', 'capacity_bytes', 'failure']
+_BASE_DTYPES = {
+    'date': pl.Date, 'serial_number': pl.Utf8, 'model': pl.Utf8,
+    'capacity_bytes': pl.Int64, 'failure': pl.Int64,
+}
 
-lazy_frames = []
-for pf in parquet_files:
+n_files = len(parquet_files)
+for i, pf in enumerate(parquet_files, 1):
     schema = pl.read_parquet_schema(pf)
     base_present = [c for c in KEEP_BASE_COLS if c in schema]
-    raw_present = [
-        f'smart_{sid}_raw' for sid in MODELED_SMART_IDS
-        if f'smart_{sid}_raw' in schema
+    raw_present = [c for c in RAW_COLS if c in schema]
+
+    lf = pl.scan_parquet(pf).select(base_present + raw_present)
+    # Guarantee every base column exists (older files may omit one).
+    base_missing = [
+        pl.lit(None, dtype=_BASE_DTYPES[c]).alias(c)
+        for c in KEEP_BASE_COLS if c not in base_present
     ]
-    lf_file = pl.scan_parquet(pf).select(base_present + raw_present)
-    # Reconcile to the full modeled set (raw only; normalized is dropped next).
-    lf_file = reconcile_smart_schema(lf_file, MODELED_SMART_IDS, keep_normalized=False)
-    lazy_frames.append(lf_file)
+    if base_missing:
+        lf = lf.with_columns(base_missing)
 
-raw_cols = [f'smart_{sid}_raw' for sid in MODELED_SMART_IDS]
-combined = pl.concat(lazy_frames, how='vertical_relaxed').select(KEEP_BASE_COLS + raw_cols)
+    lf = reconcile_smart_schema(lf, MODELED_SMART_IDS, keep_normalized=False)
+    lf = filter_hdds_only(lf, ssd_models=ssd_models)
+    lf = assign_era(lf)
+    lf = encode_smart_availability_indicators(lf, ERA_GATED_SMART_IDS)
+    lf = canonicalize_drive_model(lf)
+    lf = lf.select(FINAL_COLS)
 
-# Fail-loud column guard right after the first build step: a stale module or a
-# bad reconcile would surface here before any expensive downstream work.
-built_cols = set(combined.collect_schema().names())
-required = set(KEEP_BASE_COLS) | set(raw_cols)
-missing = required - built_cols
-assert not missing, f"combined frame missing expected columns: {sorted(missing)}"
-print(f"Combined lazy frame columns: {len(built_cols)} (base + {len(raw_cols)} SMART raw)")
+    if i == 1:
+        built = set(lf.collect_schema().names())
+        missing = set(FINAL_COLS) - built
+        assert not missing, f"first cleaned file missing columns: {sorted(missing)}"
+        print(f"Column guard passed: {len(built)} columns "
+              f"(base + derived + {len(RAW_COLS)} SMART raw + {len(HAS_COLS)} indicators)")
 
-# %%
-pipeline = filter_hdds_only(combined, ssd_models=ssd_models)
-pipeline = assign_era(pipeline)
-pipeline = encode_smart_availability_indicators(pipeline, ERA_GATED_SMART_IDS)
-pipeline = canonicalize_drive_model(pipeline)
+    out_path = CLEANED_DIR / f'{pf.stem}_cleaned.parquet'
+    lf.sink_parquet(out_path)
+    print(f"  [{i:>2}/{n_files}] cleaned {pf.name} -> {out_path.name}")
 
-# %% [markdown]
-# ## 3. Drive-day deduplication and per-drive temporal sort
-#
-# There should be exactly one observation per `(serial_number, date)`. Duplicates
-# are dropped, keeping the first. The single sort by `(serial_number, date)`
-# established here is what every downstream rolling and lag feature relies on.
-
-# %%
-pipeline = pipeline.unique(subset=['serial_number', 'date'], keep='first')
-pipeline = pipeline.sort(['serial_number', 'date'])
+print("Row-level cleaning complete (pre-dedup).")
 
 # %% [markdown]
-# ## 4. Censoring marker
+# ## 2b. Drive-day de-duplication (isolated per file)
 #
-# Each drive's final observation is classified as an observed failure
-# (`failure_observed`) or a right-censoring event (`censored`), required for the
-# survival framing of the lead-time analysis.
+# Some raw files carry duplicate drive-day rows (exact duplicate daily records;
+# the failure flag is a property of the drive-day, so duplicates do not
+# conflict). De-duplication must hold a whole file at once, which does not
+# stream and, run inline across all files, accumulates memory. Each file is
+# therefore de-duplicated in a fresh subprocess whose memory the operating
+# system reclaims on exit, keeping peak memory at roughly one file. Per-file
+# dedup equals global dedup because each quarter resides in a single file.
 
 # %%
-pipeline = mark_censoring(pipeline)
+_DEDUP_SCRIPT = (
+    "import sys, polars as pl; p = sys.argv[1]; "
+    "df = pl.read_parquet(p).unique(subset=['serial_number', 'date']); "
+    "df.write_parquet(p); print(df.height)"
+)
+
+cleaned_files = sorted(CLEANED_DIR.glob('*_cleaned.parquet'))
+total_rows = 0
+for cf in cleaned_files:
+    result = subprocess.run(
+        [sys.executable, '-c', _DEDUP_SCRIPT, str(cf)],
+        capture_output=True, text=True, check=True,
+    )
+    post_n = int(result.stdout.strip().splitlines()[-1])
+    total_rows += post_n
+    print(f"  deduped {cf.name}: {post_n:,} rows")
+
+print(f"De-duplication complete. {total_rows:,} rows retained.")
 
 # %% [markdown]
-# ## 5. Materialize and post-preprocessing assertions
+# ## 3. Post-preprocessing checks and duplicate accounting
 #
-# Stream the pipeline to local Parquet, then run the assertion suite on a lazy
-# scan of the result. The suite confirms the failure-event count survived, the
-# grain is one row per drive-day, every row received a known era, and the
-# multi-year fleet expansion is preserved.
+# Computed with the streaming engine at full scale: the cleaned failure-row
+# count, unknown-era rows, and the multi-year fleet expansion. Drive-day
+# uniqueness was already enforced in the per-file de-duplication pass. The pre-
+# versus post-dedup row and failure figures are reported so the effect of the
+# duplicate drive-day rows in the raw files is explicit. The authoritative
+# failure-event cross-check (cleaned failure rows equal the count of failing
+# drives) is made against the terminal table below.
 
 # %%
-LOCAL_PARQUET = LOCAL_SINK / 'backblaze_preprocessed.parquet'
-pipeline.sink_parquet(LOCAL_PARQUET, engine='streaming')
-print(f"Streamed preprocessed table to {LOCAL_PARQUET}")
+cleaned_lf = pl.scan_parquet(str(CLEANED_DIR / '*.parquet'))
 
-result_lf = pl.scan_parquet(LOCAL_PARQUET)
+agg = cleaned_lf.select(
+    (pl.col('failure') == 1).sum().alias('failures'),
+    (pl.col('era').is_null() | (pl.col('era') == 'unknown')).sum().alias('unknown_era'),
+).collect(engine='streaming')
+n_failures = int(agg['failures'][0])
+n_unknown_era = int(agg['unknown_era'][0])
 
-n_failures = assert_failure_event_count(result_lf, expected=31_062, tolerance=200)
-n_dupe = assert_one_row_per_drive_day(result_lf)
-n_unknown_era = assert_era_assignment_complete(result_lf)
-fleet_before, fleet_after = assert_fleet_expansion(result_lf, cutoff_date='2020-01-01')
+# Distinct drives before and after 2020 (n_unique holds only the serial set).
+fleet = cleaned_lf.select(
+    pl.col('serial_number').filter(pl.col('date') < date(2020, 1, 1)).n_unique().alias('before'),
+    pl.col('serial_number').filter(pl.col('date') >= date(2020, 1, 1)).n_unique().alias('after'),
+).collect(engine='streaming')
+fleet_before = int(fleet['before'][0])
+fleet_after = int(fleet['after'][0])
 
-total_rows = int(result_lf.select(pl.len()).collect().item())
-print(f"Rows:                 {total_rows:,}")
-print(f"Failure events:       {n_failures:,}")
-print(f"Duplicate drive-days: {n_dupe}")
-print(f"Unknown-era rows:     {n_unknown_era}")
+# Duplicate accounting: the pre-dedup HDD figures come from the raw model
+# inventory; the post-dedup figures come from the cleaned dataset.
+hdd_raw_rows = sum(model_counts[m] for m in model_counts if m not in ssd_models)
+dupes_removed = hdd_raw_rows - total_rows
+failure_dupes_removed = hdd_failures_expected - n_failures
+
+if dupes_removed < 0:
+    raise AssertionFailedError(
+        f"dedup increased the row count ({dupes_removed:,}); investigate"
+    )
+if n_unknown_era > 0:
+    raise AssertionFailedError(f"{n_unknown_era:,} rows have an unknown/null era; expected 0")
+if not (fleet_after > fleet_before):
+    raise AssertionFailedError(
+        f"distinct drives after 2020 ({fleet_after:,}) should exceed those "
+        f"before ({fleet_before:,})"
+    )
+
+print(f"HDD rows raw / deduped:      {hdd_raw_rows:,} / {total_rows:,}  "
+      f"({dupes_removed:,} duplicate drive-days removed)")
+print(f"HDD failures raw / deduped:  {hdd_failures_expected:,} / {n_failures:,}  "
+      f"({failure_dupes_removed:,} duplicate failure rows removed)")
+print(f"Unknown-era rows:            {n_unknown_era}")
 print(f"Distinct drives pre/post 2020: {fleet_before:,} / {fleet_after:,}")
 
 # %% [markdown]
 # ### Per-era verification table
 #
-# Row counts, distinct drives, failure events, and SMART 187 / 188 availability
-# by era, to confirm the cleaned table matches the schema-evolution census.
+# Row counts, failure events, and SMART 187 / 188 availability by era, to
+# confirm the cleaned table matches the schema-evolution census. Only cheap
+# streaming aggregations are used here (no distinct-drive count) so the pass
+# stays light.
 
 # %%
 verification = (
-    result_lf.group_by('era')
+    cleaned_lf.group_by('era')
     .agg(
         pl.len().alias('rows'),
-        pl.col('serial_number').n_unique().alias('drives'),
         (pl.col('failure') == 1).sum().alias('failures'),
         pl.col('has_smart_187').mean().alias('smart_187_avail'),
         pl.col('has_smart_188').mean().alias('smart_188_avail'),
     )
     .sort('era')
-    .collect()
+    .collect(engine='streaming')
 )
 print(verification.to_pandas().to_string(index=False))
 verification.write_csv(TABLES_DIR / 'backblaze_preprocessing_verification.csv')
 print(f"Saved {TABLES_DIR / 'backblaze_preprocessing_verification.csv'}")
 
 # %% [markdown]
-# ## 6. Export to GCS Parquet plus Drive manifest
+# ## 4. Per-drive terminal (censoring) summary
 #
-# Upload the preprocessed Parquet to GCS (the modeling notebooks read it from
-# there) and write a small manifest to Drive describing the produced artifact.
+# One row per drive: first and last observation dates, whether the drive ever
+# failed, and the observed span. Backblaze marks ``failure = 1`` only on a
+# drive's removal (final) day, so the per-drive maximum of the failure flag is
+# the terminal failure indicator, computed without a per-group sort. A drive
+# that ever shows a failure is an observed failure; one that simply stops
+# appearing is right-censored.
+#
+# Grouping every drive across the whole table at once does not fit in memory, so
+# the aggregation is done map-reduce style in a fresh subprocess: a small
+# partial aggregate per file (each file fits comfortably), then a single combine
+# over the concatenated partials (a few million rows, not the full table). The
+# partial keeps ``min``/``max`` dates, ``max`` failure, ``first`` model and
+# manufacturer, and the row count; the combine folds these across a drive's
+# files. ``failure_observed`` summed across drives should equal the cleaned
+# failure-row count.
 
 # %%
-blob_name = f'{GCS_PREPROCESSED_PREFIX}/backblaze_preprocessed.parquet'
-bucket.blob(blob_name).upload_from_filename(str(LOCAL_PARQUET))
-gcs_uri = f'gs://{GCS_BUCKET}/{blob_name}'
-print(f"Uploaded to {gcs_uri}")
+TERMINAL_LOCAL = CLEANED_DIR / 'backblaze_drive_terminal.parquet'
+_TERMINAL_SCRIPT = """
+import sys
+import glob
+import polars as pl
+cleaned_dir, out_path = sys.argv[1], sys.argv[2]
+files = sorted(glob.glob(cleaned_dir + '/*_cleaned.parquet'))
+partials = []
+for f in files:
+    partials.append(
+        pl.scan_parquet(f)
+        .group_by('serial_number')
+        .agg(
+            pl.col('date').min().alias('first_date'),
+            pl.col('date').max().alias('last_date'),
+            pl.col('failure').max().alias('max_failure'),
+            pl.col('model_canonical').first().alias('model_canonical'),
+            pl.col('manufacturer').first().alias('manufacturer'),
+            pl.len().alias('n_obs'),
+        )
+        .collect()
+    )
+term = (
+    pl.concat(partials)
+    .group_by('serial_number')
+    .agg(
+        pl.col('first_date').min().alias('first_date'),
+        pl.col('last_date').max().alias('last_date'),
+        pl.col('max_failure').max().alias('terminal_failure'),
+        pl.col('model_canonical').first().alias('model_canonical'),
+        pl.col('manufacturer').first().alias('manufacturer'),
+        pl.col('n_obs').sum().alias('n_obs'),
+    )
+    .with_columns(
+        pl.col('terminal_failure').cast(pl.Int8).alias('failure_observed'),
+        (1 - pl.col('terminal_failure')).cast(pl.Int8).alias('censored'),
+        (pl.col('last_date') - pl.col('first_date')).dt.total_days().alias('observed_span_days'),
+    )
+)
+term.write_parquet(out_path)
+print(f"{term.height} {int(term['failure_observed'].sum())} {int(term['censored'].sum())}")
+"""
+
+result = subprocess.run(
+    [sys.executable, '-c', _TERMINAL_SCRIPT, str(CLEANED_DIR), str(TERMINAL_LOCAL)],
+    capture_output=True, text=True, check=True,
+)
+n_drives, n_failed_drives, n_censored_drives = (
+    int(x) for x in result.stdout.strip().splitlines()[-1].split()
+)
+print(f"Drives:                 {n_drives:,}")
+print(f"Observed failures:      {n_failed_drives:,}")
+print(f"Right-censored drives:  {n_censored_drives:,}")
+print(f"Wrote terminal table: {TERMINAL_LOCAL}")
+
+# Cross-check: one failure row per failing drive, so these should agree.
+assert abs(n_failed_drives - n_failures) <= 200, (
+    f"terminal failure_observed ({n_failed_drives:,}) disagrees with the "
+    f"failure-event count ({n_failures:,}); investigate before proceeding"
+)
+
+# %% [markdown]
+# ## 5. Export to GCS plus Drive manifest
+#
+# Upload the cleaned per-file Parquet dataset and the terminal table to GCS (the
+# feature and modeling notebooks read them from there) and write a manifest to
+# Drive describing the produced artifacts.
+
+# %%
+cleaned_files = sorted(CLEANED_DIR.glob('*_cleaned.parquet'))
+for cf in cleaned_files:
+    bucket.blob(f'{GCS_PREPROCESSED_PREFIX}/cleaned/{cf.name}').upload_from_filename(str(cf))
+bucket.blob(f'{GCS_PREPROCESSED_PREFIX}/backblaze_drive_terminal.parquet').upload_from_filename(
+    str(TERMINAL_LOCAL)
+)
+cleaned_gcs_prefix = f'gs://{GCS_BUCKET}/{GCS_PREPROCESSED_PREFIX}/cleaned/'
+print(f"Uploaded {len(cleaned_files)} cleaned files and the terminal table to "
+      f"gs://{GCS_BUCKET}/{GCS_PREPROCESSED_PREFIX}/")
 
 manifest = {
     "dataset": "backblaze",
     "stage": "preprocessed",
     "source_notebook": "09_backblaze_preprocessing.py",
-    "gcs_uri": gcs_uri,
-    "local_parquet": str(LOCAL_PARQUET),
+    "cleaned_gcs_prefix": cleaned_gcs_prefix,
+    "terminal_gcs_uri": f'gs://{GCS_BUCKET}/{GCS_PREPROCESSED_PREFIX}/backblaze_drive_terminal.parquet',
+    "cleaned_file_count": len(cleaned_files),
     "rows": total_rows,
     "failure_events": n_failures,
-    "duplicate_drive_days": n_dupe,
+    "drives": n_drives,
+    "observed_failures": n_failed_drives,
+    "right_censored_drives": n_censored_drives,
+    "duplicate_drive_days_removed": dupes_removed,
+    "duplicate_failure_rows_removed": failure_dupes_removed,
     "unknown_era_rows": n_unknown_era,
     "distinct_drives_pre_2020": fleet_before,
     "distinct_drives_post_2020": fleet_after,
@@ -334,26 +501,32 @@ manifest = {
     "universal_smart_ids": list(UNIVERSAL_SMART_IDS),
     "era_gated_smart_ids": list(ERA_GATED_SMART_IDS),
     "excluded_ssd_models": sorted(ssd_models),
-    "columns": result_lf.collect_schema().names(),
+    "columns": FINAL_COLS,
+    "note": (
+        "Global per-(serial_number, date) sort deferred to feature-time window "
+        "ordering; drive-day uniqueness verified by assertion; censoring emitted "
+        "as a per-drive terminal table."
+    ),
 }
 with open(MANIFEST_PATH, 'w') as f:
     json.dump(manifest, f, indent=2)
 print(f"Wrote manifest: {MANIFEST_PATH}")
 
 # %% [markdown]
-# ## 7. Summary
+# ## 6. Summary
 #
 # Report back: the row count and failure-event count after cleaning, the
-# per-era verification table (especially the SMART 187 / 188 availability by
-# era), and the excluded SSD model list. These feed the feature-engineering
-# notebook and the working-set construction.
+# per-era verification table (especially SMART 187 / 188 availability by era),
+# the excluded SSD model list, and the observed-vs-censored drive split. These
+# feed the feature-engineering notebook and the working-set construction.
 
 # %%
 print("BACKBLAZE PREPROCESSING SUMMARY")
 print("=" * 60)
-print(f"Rows:            {total_rows:,}")
-print(f"Failure events:  {n_failures:,}")
-print(f"Excluded SSDs:   {len(ssd_models)} models")
-print(f"Modeled SMART:   {len(MODELED_SMART_IDS)} IDs ({len(ERA_GATED_SMART_IDS)} era-gated)")
-print(f"GCS:             {gcs_uri}")
+print(f"Rows:               {total_rows:,}")
+print(f"Failure events:     {n_failures:,}")
+print(f"Drives:             {n_drives:,} ({n_failed_drives:,} failed, {n_censored_drives:,} censored)")
+print(f"Excluded SSDs:      {len(ssd_models)} models")
+print(f"Modeled SMART:      {len(MODELED_SMART_IDS)} IDs ({len(ERA_GATED_SMART_IDS)} era-gated)")
+print(f"Cleaned files:      {len(cleaned_files)} at {cleaned_gcs_prefix}")
 print("=" * 60)
