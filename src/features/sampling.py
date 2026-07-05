@@ -359,3 +359,109 @@ SELECT
 FROM inst i
 JOIN selected s USING (collection_id)
 """
+
+
+# ---------------------------------------------------------------------------
+# Backblaze working-set construction.
+# ---------------------------------------------------------------------------
+@dataclass
+class BackblazeSamplingManifest:
+    """Provenance record for a Backblaze working set.
+
+    Attributes:
+        total_rows: rows in the working set (positives plus sampled healthy).
+        positive_rows: rows positive for ``positive_column`` (all retained).
+        healthy_population: healthy rows before sampling.
+        healthy_sampled: healthy rows retained.
+        ratio: achieved healthy-to-positive ratio.
+        positive_column: the horizon target used to define positives.
+        seed: deterministic sampling seed.
+        strata: one row per ``strata_columns`` group with healthy population and
+            sampled counts, to verify proportional (stratified) retention.
+    """
+
+    total_rows: int
+    positive_rows: int
+    healthy_population: int
+    healthy_sampled: int
+    ratio: float
+    positive_column: str
+    seed: int = DEFAULT_SEED
+    strata: list[dict] = field(default_factory=list)
+
+
+def build_working_set_backblaze(
+    features: pl.DataFrame,
+    ratio: int = 20,
+    positive_column: str = "failure_within_30d",
+    strata_columns: tuple[str, ...] = ("model_canonical", "year"),
+    key_columns: tuple[str, ...] = ("serial_number", "date"),
+    seed: int = DEFAULT_SEED,
+) -> tuple[pl.DataFrame, BackblazeSamplingManifest]:
+    """Build a Backblaze working set: keep every horizon-positive row, sample healthy.
+
+    Every row positive for ``positive_column`` (the union of the pre-failure
+    windows for the chosen horizon) is retained. The healthy rows are
+    undersampled to ``ratio`` healthy per positive using a deterministic hash of
+    ``key_columns``; because the hash is uniform, each ``strata_columns`` group
+    keeps the same fraction, so the ``(drive_model, year)`` composition of the
+    healthy sample matches the healthy population (proportional stratified
+    sampling). Failures are never discarded; only the abundant healthy class is
+    thinned (V17).
+
+    Operates on a materialized :class:`pl.DataFrame` because it is applied per
+    drive-hash partition, where a partition fits in memory. Validated against
+    ``eda_decisions.csv`` rows V17 (imbalance handling) and P07 (multi-horizon
+    targets); the horizon-positive definition and the primary ratio are recorded
+    in the Backblaze working-set decision.
+
+    Args:
+        features: per-partition feature matrix with ``positive_column``,
+            ``strata_columns``, and ``key_columns`` present.
+        ratio: target healthy-to-positive ratio (default 20).
+        positive_column: horizon target defining positives (default
+            ``failure_within_30d``).
+        strata_columns: columns whose proportions the healthy sample preserves.
+        key_columns: columns hashed to select healthy rows deterministically.
+        seed: deterministic sampling seed.
+
+    Returns:
+        ``(working_set, manifest)``.
+    """
+    positives = features.filter(pl.col(positive_column) == 1)
+    healthy = features.filter(pl.col(positive_column) == 0)
+    n_pos = positives.height
+    n_healthy = healthy.height
+
+    target_healthy = ratio * n_pos
+    if n_healthy > target_healthy and n_healthy > 0:
+        keep = int(round(target_healthy / n_healthy * 1_000_000))
+        healthy_sample = healthy.filter(
+            (pl.struct(list(key_columns)).hash(seed) % 1_000_000) < keep
+        )
+    else:
+        healthy_sample = healthy
+
+    working_set = pl.concat([positives, healthy_sample])
+
+    strata_cols = list(strata_columns)
+    pop = healthy.group_by(strata_cols).len().rename({"len": "healthy_population"})
+    samp = healthy_sample.group_by(strata_cols).len().rename({"len": "healthy_sampled"})
+    strata = (
+        pop.join(samp, on=strata_cols, how="left")
+        .with_columns(pl.col("healthy_sampled").fill_null(0))
+        .sort(strata_cols)
+        .to_dicts()
+    )
+
+    manifest = BackblazeSamplingManifest(
+        total_rows=working_set.height,
+        positive_rows=n_pos,
+        healthy_population=n_healthy,
+        healthy_sampled=healthy_sample.height,
+        ratio=(healthy_sample.height / n_pos) if n_pos else 0.0,
+        positive_column=positive_column,
+        seed=seed,
+        strata=strata,
+    )
+    return working_set, manifest

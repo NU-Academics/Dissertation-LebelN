@@ -16,8 +16,14 @@ from __future__ import annotations
 
 import polars as pl
 
+from datetime import date
+
 from src.data.schemas import EVENT_FAIL, EVENT_FINISH, EVENT_SCHEDULE, EVENT_SUBMIT
-from src.features.sampling import build_working_set_google, build_working_set_sql
+from src.features.sampling import (
+    build_working_set_backblaze,
+    build_working_set_google,
+    build_working_set_sql,
+)
 
 # Priorities that fall in distinct bands (schemas.py): free <= 99, production 120-359.
 PRIO = {"free": 50, "production": 200}
@@ -136,3 +142,70 @@ def test_target_larger_than_population_keeps_everything():
     pop_prio, samp_prio, _pc, _sc = _marginals(manifest.stratification)
     for tier in pop_prio:
         assert abs(samp_prio[tier] - pop_prio[tier]) <= 0.02
+
+
+# ---------------------------------------------------------------------------
+# Backblaze working-set sampler (V17, P07)
+# ---------------------------------------------------------------------------
+
+
+def _backblaze_features(n_pos: int, n_healthy: int) -> pl.DataFrame:
+    """Feature-shaped frame: ``n_pos`` horizon-positive rows and ``n_healthy``
+    healthy rows evenly split across two models and two years, so proportional
+    stratified sampling can be checked."""
+    pos = {
+        "serial_number": [f"P{i}" for i in range(n_pos)],
+        "date": [date(2022, 1, 1)] * n_pos,
+        "model_canonical": ["ST"] * n_pos,
+        "year": [2022] * n_pos,
+        "failure_within_30d": [1] * n_pos,
+    }
+    healthy = {
+        "serial_number": [f"H{i}" for i in range(n_healthy)],
+        "date": [date(2022 + (i % 2), 6, (i % 27) + 1) for i in range(n_healthy)],
+        "model_canonical": ["ST" if i % 2 else "HG" for i in range(n_healthy)],
+        "year": [2022 + (i % 2) for i in range(n_healthy)],
+        "failure_within_30d": [0] * n_healthy,
+    }
+    return pl.concat([pl.DataFrame(pos), pl.DataFrame(healthy)])
+
+
+def test_backblaze_keeps_all_positives_and_hits_ratio() -> None:
+    """Every horizon-positive row is retained; healthy is thinned to ~ratio:1."""
+    ws, manifest = build_working_set_backblaze(
+        _backblaze_features(100, 100_000), ratio=20
+    )
+    assert manifest.positive_rows == 100
+    assert (ws["failure_within_30d"] == 1).sum() == 100  # all positives kept
+    # Achieved healthy-to-positive ratio is close to the target.
+    assert abs(manifest.ratio - 20) <= 2.0
+
+
+def test_backblaze_sampling_preserves_strata_proportions() -> None:
+    """The healthy sample keeps the model composition of the healthy population."""
+    ws, _ = build_working_set_backblaze(_backblaze_features(100, 100_000), ratio=20)
+    healthy = ws.filter(pl.col("failure_within_30d") == 0)
+    by_model = dict(
+        healthy.group_by("model_canonical").len().sort("model_canonical").iter_rows()
+    )
+    # Population is 50/50 across the two models; the sample stays near 50/50.
+    total = sum(by_model.values())
+    for model in ("ST", "HG"):
+        assert abs(by_model[model] / total - 0.5) < 0.05
+
+
+def test_backblaze_noop_when_healthy_below_target() -> None:
+    """When healthy already sits below ratio:1, nothing is dropped."""
+    ws, manifest = build_working_set_backblaze(
+        _backblaze_features(100, 500), ratio=20
+    )
+    assert manifest.healthy_sampled == 500
+    assert manifest.total_rows == 600
+
+
+def test_backblaze_deterministic() -> None:
+    """The same seed yields the same working set."""
+    frame = _backblaze_features(50, 20_000)
+    a, _ = build_working_set_backblaze(frame, ratio=10, seed=42)
+    b, _ = build_working_set_backblaze(frame, ratio=10, seed=42)
+    assert a.sort("serial_number").equals(b.sort("serial_number"))

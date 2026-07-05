@@ -42,15 +42,18 @@
 # healthy observations, and writes only the retained rows. Peak memory is
 # bounded to one partition and reclaimed on subprocess exit.
 #
-# **Working set.** The primary working set keeps every row that is positive for
-# the 30-day horizon (the union of the pre-failure windows) and a
-# proportionally stratified sample of the remaining healthy observations at the
-# target healthy-to-positive ratio (default 100:1). The formal sampler and the
-# 50:1 / 200:1 sensitivity branches follow in the working-set construction step.
+# **Working set.** Positives are every row within a drive's 30-day pre-failure
+# window (the correct positive class for a "fails within N days" model), so the
+# positive count is far larger than the count of failure-day events. Holding the
+# extreme-imbalance ratio at the failure-event level would produce an
+# intractable set, so the healthy class is undersampled to a tractable
+# healthy-to-positive ratio via `src/features/sampling.build_working_set_backblaze`
+# (proportional stratified by drive model and year). The primary set uses 20:1
+# with 10:1 and 40:1 as sensitivity branches; each ratio is written separately.
 #
 # **Outputs.**
-# - GCS Parquet working set under
-#   `gs://{PROJECT}-dissertation-data/backblaze_features/working_set_100x/`.
+# - GCS Parquet working sets under
+#   `gs://{PROJECT}-dissertation-data/backblaze_features/working_set_{20,10,40}x/`.
 # - `outputs/features/backblaze_feature_schema.json`.
 # - `outputs/tables/backblaze_feature_engineering_verification.csv`.
 
@@ -106,16 +109,18 @@ FEATURES_DIR = OUTPUT_DIR / 'features'
 TABLES_DIR = OUTPUT_DIR / 'tables'
 CLEANED_DIR = Path('/content/backblaze_cleaned')
 WORKING_DIR = Path('/content/backblaze_features')
-for d in [FEATURES_DIR, TABLES_DIR, WORKING_DIR]:
+for d in [FEATURES_DIR, TABLES_DIR, CLEANED_DIR, WORKING_DIR]:
     d.mkdir(parents=True, exist_ok=True)
 
 GCS_BUCKET = f'{PROJECT_ID}-dissertation-data'
 GCS_CLEANED_PREFIX = 'backblaze_preprocessed/cleaned'
-GCS_FEATURES_PREFIX = 'backblaze_features/working_set_100x'
+GCS_FEATURES_BASE = 'backblaze_features'
 
-N_BUCKETS = 40          # drive-hash partitions; each holds complete drive histories
-RATIO = 100             # target healthy-to-positive observation ratio (primary set)
-POSITIVE_HORIZON = 30   # keep every row positive for this horizon in full
+N_BUCKETS = 40             # drive-hash partitions; each holds complete drive histories
+PRIMARY_RATIO = 20         # primary healthy-to-positive ratio
+SENSITIVITY_RATIOS = (10, 40)  # sensitivity branches
+RATIOS = (PRIMARY_RATIO, *SENSITIVITY_RATIOS)
+POSITIVE_HORIZON = 30      # positives are the union of the pre-failure windows for this horizon
 SEED = 42
 
 # %% [markdown]
@@ -168,13 +173,14 @@ print(f"Dataset start date: {dataset_start}")
 # %%
 WORKER_PATH = Path('/content/_bb_feature_worker.py')
 WORKER_SRC = '''
+import os
 import sys
 import glob
 import polars as pl
 
-repo_dir, cleaned_dir, out_dir, bucket_idx, n_buckets, ratio, horizon, seed, start_iso = (
+repo_dir, cleaned_dir, out_dir, bucket_idx, n_buckets, ratios_csv, horizon, seed, start_iso = (
     sys.argv[1], sys.argv[2], sys.argv[3], int(sys.argv[4]), int(sys.argv[5]),
-    int(sys.argv[6]), int(sys.argv[7]), int(sys.argv[8]), sys.argv[9],
+    sys.argv[6], int(sys.argv[7]), int(sys.argv[8]), sys.argv[9],
 )
 if repo_dir not in sys.path:
     sys.path.insert(0, repo_dir)
@@ -183,8 +189,10 @@ from src.features.backblaze_smart import (
     add_tier1_smart_features, add_tier2_rolling_features,
     add_tier3_drift_features, add_multi_horizon_targets,
 )
+from src.features.sampling import build_working_set_backblaze
 
 start_date = date.fromisoformat(start_iso)
+ratios = [int(r) for r in ratios_csv.split(",")]
 files = sorted(glob.glob(cleaned_dir + "/*_cleaned.parquet"))
 lf = (
     pl.scan_parquet(files)
@@ -198,43 +206,43 @@ lf = add_multi_horizon_targets(lf)
 df = lf.collect()
 
 pos_col = "failure_within_" + str(horizon) + "d"
-positives = df.filter(pl.col(pos_col) == 1)
-healthy = df.filter(pl.col(pos_col) == 0)
-n_pos = positives.height
-n_healthy = healthy.height
-target_healthy = ratio * n_pos
-if n_healthy > target_healthy and n_healthy > 0:
-    keep = int(target_healthy / n_healthy * 1_000_000)
-    healthy = healthy.filter(
-        (pl.struct(["serial_number", "date"]).hash(seed) % 1_000_000) < keep
+parts = []
+for r in ratios:
+    ws, man = build_working_set_backblaze(df, ratio=r, positive_column=pos_col, seed=seed)
+    rdir = out_dir + "/ratio_" + str(r)
+    os.makedirs(rdir, exist_ok=True)
+    ws.write_parquet(rdir + "/bucket_" + str(bucket_idx) + ".parquet")
+    parts.append(
+        str(r) + ":" + str(ws.height) + ":" + str(man.positive_rows) + ":" + str(man.healthy_sampled)
     )
-out = pl.concat([positives, healthy])
-out.write_parquet(out_dir + "/bucket_" + str(bucket_idx) + ".parquet")
-print(str(out.height) + " " + str(n_pos) + " " + str(healthy.height))
+print(" ".join(parts))
 '''
 WORKER_PATH.write_text(WORKER_SRC)
 print(f"Wrote worker: {WORKER_PATH}")
 
 # %%
-total_rows = 0
-total_pos = 0
-total_healthy = 0
+totals = {r: {"rows": 0, "pos": 0, "healthy": 0} for r in RATIOS}
 for b in range(N_BUCKETS):
     result = subprocess.run(
         [sys.executable, str(WORKER_PATH), REPO_DIR, str(CLEANED_DIR), str(WORKING_DIR),
-         str(b), str(N_BUCKETS), str(RATIO), str(POSITIVE_HORIZON), str(SEED),
-         dataset_start.isoformat()],
+         str(b), str(N_BUCKETS), ",".join(str(r) for r in RATIOS),
+         str(POSITIVE_HORIZON), str(SEED), dataset_start.isoformat()],
         capture_output=True, text=True, check=True,
     )
-    rows, pos, healthy = (int(x) for x in result.stdout.strip().splitlines()[-1].split())
-    total_rows += rows
-    total_pos += pos
-    total_healthy += healthy
-    print(f"  bucket {b:>2}/{N_BUCKETS}: {rows:,} rows ({pos:,} positive, {healthy:,} healthy)")
+    for part in result.stdout.strip().splitlines()[-1].split():
+        r, rows, pos, healthy = (int(x) for x in part.split(":"))
+        totals[r]["rows"] += rows
+        totals[r]["pos"] += pos
+        totals[r]["healthy"] += healthy
+    print(f"  bucket {b:>2}/{N_BUCKETS} done")
 
-print(f"\nWorking set built: {total_rows:,} rows "
-      f"({total_pos:,} positive, {total_healthy:,} healthy, "
-      f"ratio {total_healthy / max(total_pos, 1):.1f}:1)")
+print()
+for r in RATIOS:
+    t = totals[r]
+    tag = "primary" if r == PRIMARY_RATIO else "sensitivity"
+    print(f"  working_set_{r}x ({tag}): {t['rows']:,} rows "
+          f"({t['pos']:,} positive, {t['healthy']:,} healthy, "
+          f"{t['healthy'] / max(t['pos'], 1):.1f}:1)")
 
 # %% [markdown]
 # ## 3. Feature schema and verification
@@ -243,10 +251,11 @@ print(f"\nWorking set built: {total_rows:,} rows "
 # per-year positive rates for the verification table.
 
 # %%
-working_lf = pl.scan_parquet(str(WORKING_DIR / 'bucket_*.parquet'))
+PRIMARY_DIR = WORKING_DIR / f'ratio_{PRIMARY_RATIO}'
+working_lf = pl.scan_parquet(str(PRIMARY_DIR / 'bucket_*.parquet'))
 schema = working_lf.collect_schema()
-feature_cols = [c for c in schema.names()]
-print(f"Working set columns: {len(feature_cols)}")
+feature_cols = list(schema.names())
+print(f"Primary working set columns: {len(feature_cols)}")
 
 FEATURE_SCHEMA_PATH = FEATURES_DIR / 'backblaze_feature_schema.json'
 with open(FEATURE_SCHEMA_PATH, 'w') as f:
@@ -256,8 +265,10 @@ with open(FEATURE_SCHEMA_PATH, 'w') as f:
             "columns": feature_cols,
             "dtypes": {c: str(schema[c]) for c in feature_cols},
             "n_buckets": N_BUCKETS,
-            "ratio": RATIO,
+            "primary_ratio": PRIMARY_RATIO,
+            "ratios": list(RATIOS),
             "positive_horizon": POSITIVE_HORIZON,
+            "positive_column": f"failure_within_{POSITIVE_HORIZON}d",
             "seed": SEED,
             "dataset_start": dataset_start.isoformat(),
         },
@@ -283,14 +294,17 @@ print(f"Saved {TABLES_DIR / 'backblaze_feature_engineering_verification.csv'}")
 # %% [markdown]
 # ## 4. Export to GCS
 #
-# Upload the working-set partitions to GCS for the modeling notebooks.
+# Upload each working set (primary and sensitivity ratios) to its own GCS
+# prefix for the modeling notebooks.
 
 # %%
-bucket_files = sorted(WORKING_DIR.glob('bucket_*.parquet'))
-for bf in bucket_files:
-    bucket.blob(f'{GCS_FEATURES_PREFIX}/{bf.name}').upload_from_filename(str(bf))
-print(f"Uploaded {len(bucket_files)} working-set partitions to "
-      f"gs://{GCS_BUCKET}/{GCS_FEATURES_PREFIX}/")
+for r in RATIOS:
+    rdir = WORKING_DIR / f'ratio_{r}'
+    prefix = f'{GCS_FEATURES_BASE}/working_set_{r}x'
+    files_r = sorted(rdir.glob('bucket_*.parquet'))
+    for bf in files_r:
+        bucket.blob(f'{prefix}/{bf.name}').upload_from_filename(str(bf))
+    print(f"Uploaded {len(files_r)} partitions to gs://{GCS_BUCKET}/{prefix}/")
 
 # %% [markdown]
 # ## 5. Summary
@@ -298,9 +312,10 @@ print(f"Uploaded {len(bucket_files)} working-set partitions to "
 # %%
 print("BACKBLAZE FEATURE ENGINEERING SUMMARY")
 print("=" * 60)
-print(f"Working-set rows:   {total_rows:,}")
-print(f"Positive (30d):     {total_pos:,}")
-print(f"Healthy (sampled):  {total_healthy:,}")
+for r in RATIOS:
+    t = totals[r]
+    tag = "primary" if r == PRIMARY_RATIO else "sensitivity"
+    print(f"  working_set_{r}x ({tag}): {t['rows']:,} rows, {t['pos']:,} positive")
 print(f"Feature columns:    {len(feature_cols)}")
-print(f"GCS: gs://{GCS_BUCKET}/{GCS_FEATURES_PREFIX}/")
+print(f"GCS: gs://{GCS_BUCKET}/{GCS_FEATURES_BASE}/")
 print("=" * 60)
