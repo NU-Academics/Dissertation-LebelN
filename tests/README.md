@@ -9,14 +9,15 @@ Pytest test suite for the extracted `src/` modules. Synthetic Polars LazyFrame f
 pytest tests/ -v
 ```
 
-The suite is 81 tests across nine files (locally 72 pass and 9 skip where TensorFlow / XGBoost / LightGBM are absent; all run in Colab):
+The suite is 104 tests across ten files (locally 95 pass and 9 skip where TensorFlow / XGBoost / LightGBM are absent; all run in Colab):
 
 ```
 tests/test_smoke.py              2 tests
-tests/test_preprocessing.py      9 tests
+tests/test_preprocessing.py     23 tests
 tests/test_lifecycle.py          7 tests
 tests/test_episodes.py           6 tests
-tests/test_sampling.py           4 tests
+tests/test_sampling.py           8 tests
+tests/test_backblaze_smart.py    5 tests
 tests/test_metrics.py           10 tests
 tests/test_hypothesis.py        17 tests
 tests/test_ensemble.py          15 tests
@@ -36,7 +37,7 @@ Repo-skeleton sanity checks that must remain green throughout Chapter 4 executio
 
 ### `test_preprocessing.py` (Phase 3)
 
-Unit tests for the four pure functions in `src/preprocessing/google_traces.py`. Each fixture is hand-crafted to hit the branches the function must handle.
+Unit tests for the four pure functions in `src/preprocessing/google_traces.py` and the six in `src/preprocessing/backblaze.py`, plus the four Backblaze validation asserts. Each fixture is hand-crafted to hit the branches the function must handle.
 
 - `test_filter_sentinel_timestamps_drops_zero_and_max` and `..._accepts_alternate_time_column` cover `V25`.
 - `test_failure_label_primary` covers `V01` and `V08` (KILL exclusion).
@@ -46,6 +47,16 @@ Unit tests for the four pure functions in `src/preprocessing/google_traces.py`. 
 - `test_mnar_indicators_per_observation` builds a 1000-row fixture engineered to match V11's 87.2% / 26.8% null targets, verifies the per-row indicator flips with the underlying null pattern, and confirms the aggregated null rates land within +/- 1 percentage point of the V11 targets.
 - `test_mnar_indicators_per_instance_majority` covers `V28` with five hand-crafted instances (all-present, all-absent, 60% majority, 40% minority, exact 50% boundary).
 - `test_mnar_indicators_opt_in_skips_majority_column` confirms the opt-in flag.
+
+The Backblaze section uses a three-era synthetic fixture (early, standard, recent drives plus an SSD to exclude):
+
+- `test_filter_hdds_only_removes_ssd_models` and `..._noop_without_models` cover SSD exclusion.
+- `test_assign_era_bins_by_date` and `..._marks_out_of_range_unknown` cover era assignment from `BACKBLAZE_ERAS` (`V44`).
+- `test_reconcile_smart_schema_adds_missing_columns` confirms absent SMART columns are added all-null.
+- `test_encode_smart_availability_indicators_track_nullness` covers the `has_smart_{id}` indicator (`V16`).
+- `test_canonicalize_drive_model_derives_manufacturer` and `..._applies_aliases` cover `V18`.
+- `test_mark_censoring_flags_terminal_observations` covers the observed-failure versus censored terminal marking.
+- `test_assert_failure_event_count_pass_and_fail`, `test_assert_one_row_per_drive_day_pass_and_fail`, `test_assert_era_assignment_complete_pass_and_fail`, and `test_assert_fleet_expansion_pass_and_fail` cover the Backblaze validation asserts, and `test_backblaze_eras_constant_is_well_formed` checks the 187/188 placement (`V44`).
 
 ### `test_lifecycle.py` (Phase 3)
 
@@ -70,12 +81,28 @@ Six unit tests for `src/features/episodes.py`, covering the scheduled-episode re
 
 ### `test_sampling.py` (Phase 3, working-set sampler)
 
-Four unit tests for `src/features/sampling.py` (`P01`). Synthetic instance-events frames with a known stratum structure verify the two contract properties plus the degenerate and SQL-render paths.
+Eight unit tests for `src/features/sampling.py`. The four Google tests (`P01`) use synthetic instance-events frames with a known stratum structure to verify the contract properties plus the degenerate and SQL-render paths:
 
 - Full failure retention: every failure-bearing collection is kept in full and every FAIL instance survives, with subsampling of successful collections actually occurring.
 - Priority-tier and scheduling-class marginals preserved within 2%.
 - Target-exceeds-population path: when the target dwarfs the data, the full population is kept (the behavior the 35.1M eligible Google population actually triggers).
 - `build_working_set_sql` renders with balanced parentheses, the unconditional failure-retention branch, and the stratified prefix selection.
+
+The four Backblaze tests (`V17`, `P07`) use a feature-shaped frame with horizon-positive and healthy rows across two models and two years:
+
+- Every horizon-positive row is retained and the achieved healthy-to-positive ratio matches the target.
+- The healthy sample preserves the drive-model composition of the healthy population (proportional stratified).
+- No-op when the healthy population already sits below the target ratio.
+- Determinism under a fixed seed.
+
+### `test_backblaze_smart.py` (Phase 3, Backblaze SMART features)
+
+Five unit tests for `src/features/backblaze_smart.py`, using a single date-sorted drive fixture with zero-inflated SMART columns:
+
+- Tier 1 non-zero indicators and the leakage-safe days-since-first-non-zero timer (null before the first non-zero), plus manufacturer one-hot and capacity.
+- Tier 2 rolling mean / p95 / std, 1-day and 7-day deltas, and the reduced secondary set.
+- Tier 3 cohort ages, calendar parts, and the era-availability flags (0 for SMART 187/188 in the recent era, 1 in the standard era).
+- Multi-horizon targets flagging the correct pre-failure window and zero for a never-failing drive.
 
 ### `test_metrics.py` (Phase 4)
 
@@ -95,7 +122,7 @@ Eleven tests for `src/models/classifier.py`: fit / predict / importances and sav
 
 ### Planned
 
-- `test_features.py` (Phase 3): Tier 1 / 2 / 3 feature derivations against synthetic LazyFrames.
+- `test_features.py` (Phase 3): the Google Tier 1 / 2 / 3 builders (`historical`, `scheduling`, `temporal`, `runtime`, `utilization`) against synthetic LazyFrames. The Backblaze feature builders are already covered by `test_backblaze_smart.py`.
 - `test_conflict_labels.py` (Phase 4): the RQ2 labelers and the `prior_counts` strict-prior helper (currently validated by hand and in-notebook).
 - `test_drift_detectors.py` (Phase 7): ADWIN, Page-Hinkley, KS, PSI behavior under synthetic drift.
 

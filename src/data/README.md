@@ -2,8 +2,8 @@
 
 Two modules:
 
-- `schemas.py`: Polars schemas for the five cached BigQuery tables plus the four preprocessed outputs, sentinel constants, priority-tier bands, event-type codes, and convenience registries keyed by table name.
-- `validation.py`: assertion helpers used by the post-preprocessing assertion suite in `notebooks/08_google_preprocessing.py` Section 6 and by tests under `tests/test_preprocessing.py`.
+- `schemas.py`: Polars schemas for the five cached BigQuery tables plus the four preprocessed outputs, sentinel constants, priority-tier bands, event-type codes, the Backblaze SMART schema eras (`BACKBLAZE_ERAS`), and convenience registries keyed by table name.
+- `validation.py`: assertion helpers used by the post-preprocessing assertion suites in `notebooks/08_google_preprocessing.py` (Google) and `notebooks/09_backblaze_preprocessing.py` (Backblaze), and by tests under `tests/test_preprocessing.py`.
 
 ## `schemas.py`
 
@@ -15,6 +15,7 @@ The module exports the primitives every other Phase 3 module imports rather than
 - Priority-tier bands `PRIORITY_FREE_MAX` (99), `PRIORITY_BEST_EFFORT_LOW` / `MAX`, `PRIORITY_MID_TIER_LOW` / `MAX`, `PRIORITY_PRODUCTION_LOW` (120) / `MAX` (359), and `PRIORITY_MONITORING_LOW` (360). The Production / Monitoring split at 360 anchors the V27 monitoring-EVICT exclusion and the P04 production-EVICT sensitivity branch.
 - Event-type codes `EVENT_SUBMIT` through `EVENT_UPDATE_RUNNING` corresponding to the official Google Cluster Traces v3 release.
 - Failure-label primitives `FAIL_LOST_TYPES = (5, 8)`, `FINISH_TYPE = 6`, `TERMINAL_TYPES = (4, 5, 6, 7, 8)`.
+- `BACKBLAZE_ERAS`: the three Backblaze SMART schema eras from the schema-evolution census (notebook 07c, `V44`), each `(start_date, end_date, era_name, available_smart_ids)`. Boundaries fall at 2014Q2 and 2021Q2; SMART 187 and 188 appear only in the standard era's available set (they decline below the 50% availability bar afterward), while 197 and 5 span all three eras. These constants drive the Backblaze era assignment, availability-indicator, and conditional-inclusion decisions in `src/preprocessing/backblaze.py` and the era-gated features in `src/features/backblaze_smart.py`.
 
 ### Schemas
 
@@ -41,6 +42,13 @@ Assertions raise `AssertionFailedError` on tolerance violation and return the ob
 - `assert_tier3_inversion(lf, cpu_column="avg_cpu", label_column="failure_label")`. The regression guard for V12: failing instances must continue to exhibit lower median absolute CPU utilization than successful ones (FAIL_LOST median 0.012 vs FINISH 0.081 in Phase 2). If preprocessing or feature engineering accidentally washes out the inversion, the Chapter 4 Tier 3 ablation loses its empirical anchor.
 - `assert_monitoring_evict_excluded(lf, label_columns=..., ...)`. The regression guard for V27: monitoring-priority EVICT rows (type 4, priority >= 360) must remain NULL under every failure label. The F3.2 repeats distribution is the load-bearing evidence for the exclusion.
 - `assert_row_count(lf, expected_min, expected_max)`. Used by the lifecycle reconstruction guard and by section-level row-count checks in notebook 08.
+
+Backblaze post-preprocessing guards (notebook 09), anchored to the Phase 2 statistics and the era census:
+
+- `assert_failure_event_count(lf, expected=31062, tolerance=0, failure_column="failure")`. Confirms the failure-event count survives preprocessing (notebook 09 supplies the HDD-only expected count from a raw-versus-SSD decomposition rather than a hard-coded total).
+- `assert_one_row_per_drive_day(lf, ...)`. Confirms exactly one observation per `(serial_number, date)`; used on smaller frames and in tests (notebook 09 enforces uniqueness per file during de-duplication to stay memory-bounded).
+- `assert_era_assignment_complete(lf, era_column="era", unknown_label="unknown", max_unknown=0)`. Confirms every row received a known schema era.
+- `assert_fleet_expansion(lf, cutoff_date="2020-01-01", ...)`. Confirms the multi-year fleet expansion is preserved (distinct drives after the cutoff exceed those before).
 
 ## When to extend
 

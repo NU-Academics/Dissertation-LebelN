@@ -2,7 +2,7 @@
 
 Jupytext percent-format `.py` files are the primary work product. Each notebook captures the analytical narrative for one CRISP-DM step and produces the artifacts that downstream notebooks and `src/` modules depend on. `.ipynb` files are generated on demand in Colab and are gitignored.
 
-The decisions audit trail at `outputs/tables/eda_decisions.csv` is the canonical cross-reference for every validated analytical choice (rows `V01` through `V43` at the time of writing, plus the `P` planned and `O` open / resolved rows). When a notebook section references a decision by ID, the CSV is where to read the evidence and the next step.
+The decisions audit trail at `outputs/tables/eda_decisions.csv` is the canonical cross-reference for every validated analytical choice (rows `V01` through `V47` at the time of writing, plus the `P` planned and `O` open / resolved rows). When a notebook section references a decision by ID, the CSV is where to read the evidence and the next step.
 
 ## Phase 2: Data Understanding (complete)
 
@@ -38,7 +38,7 @@ Consolidates the per-column quality assessments from both datasets into the Chap
 
 Markdown-forward consolidation of every Phase 2 finding. Section 4 materializes `outputs/tables/eda_decisions.csv` with three status categories: **Validated (Phase 2)** for EDA-confirmed decisions, **Planned (DP)** for design commitments awaiting empirical validation, and **Open** for questions still under investigation. Cross-dataset complementarity (`V24`) is the closing finding.
 
-## Phase 3: Data Preparation (active focus on Google)
+## Phase 3: Data Preparation (Google and Backblaze)
 
 ### `07b_phase3_front_loaded_eda.py`
 
@@ -50,6 +50,10 @@ Four front-loaded EDA checks executed early in Phase 3 (Data Preparation) to res
 - **F4** (CPI/MAPI within-instance variance) refines `V11` and produces `V28`. 39.84% of instances flip the indicator within their lifetime, so preprocessing aggregates `has_hardware_counters` to a per-instance majority vote.
 
 Emits `outputs/tables/sentinel_inventory.csv`, `temporal_density.csv`, `monitoring_evict_profile.csv`, `cpi_mapi_within_instance_variance.csv`, and `outputs/figures/diurnal_density.png`.
+
+### `07c_backblaze_era_census.py`
+
+Front-loaded EDA for the Backblaze block: the SMART schema-evolution era census. Computes per-SMART-ID availability by quarter across the 2013-2025 window (681.7M drive-day rows, 93 distinct SMART IDs, 51 quarters) and clusters the quarters into three contiguous schema eras. Refines the prior hypothesis (`V44`): the boundaries fall at 2014Q2 and 2021Q2, SMART 187 and 188 are confined to the standard era (declining below the 50% availability bar afterward, about 42% in the recent era), the top predictors 197 and 5 span all three eras, and 198 is absent from the early era. Emits `outputs/tables/backblaze_schema_era_census.csv`, `outputs/tables/backblaze_eras.csv`, `outputs/figures/backblaze_schema_evolution.png`, and the `BACKBLAZE_ERAS` constants materialized in `src/data/schemas.py`.
 
 ### `08_google_preprocessing.py`
 
@@ -75,9 +79,17 @@ Validates the engineered matrix and decides working-set adequacy (`P05`). Sectio
 
 Characterizes the attempt/episode structure of the event stream before the redesign: event-sequence dumps, episode segmentation reconciliation (99.1% of failures post-schedule, 93.4% well-formed, ~1.2% open, ~5.4% multi-terminal), and the FINISH-doubling analysis (a recurring tail of genuine separate scheduled runs, not duplicate records). Source for the `V30`-`V32` segmentation rules.
 
-### Planned
+### `09_backblaze_preprocessing.py`
 
-`09_backblaze_preprocessing.py` and `10_feature_engineering_backblaze.py` are the next preprocessing-and-feature notebooks.
+The Backblaze preprocessing notebook, counterpart to notebook 08. Produces the HDD-only cleaned dataset and the per-drive terminal (censoring) table. Reuses `src/preprocessing/backblaze.py` (the six row-level transforms) and the `BACKBLAZE_ERAS` constants. Sections: SSD-exclusion inventory with a self-verifying failure decomposition (raw versus SSD versus HDD, so the check is not anchored to a hard-coded total), streaming per-file row cleaning (era assignment, SMART schema reconciliation to the 23 modeled IDs, availability indicators for the 18 era-gated IDs, drop of normalized siblings, drive-model canonicalization), per-file drive-day de-duplication, streaming post-preprocessing checks plus duplicate accounting and the per-era verification table, the per-drive terminal summary, and the GCS export plus Drive manifest. Result (`V45`): 676,445,899 drive-day rows across 486,253 drives (30,801 failed, 455,452 right-censored); 30,851 failure drive-days; 18 SSD model families excluded; 232,848 duplicate drive-days removed. Three whole-table operations are reworked for memory (streaming row cleaning, per-file de-duplication and the terminal group-by run in isolated subprocesses, the terminal as a map-reduce over per-file partials). Outputs under `gs://{project_id}-dissertation-data/backblaze_preprocessed/`, `outputs/tables/backblaze_preprocessing_verification.csv`, and `outputs/preprocessed/backblaze/manifest.json`.
+
+### `10_feature_engineering_backblaze.py`
+
+The Backblaze feature-engineering and working-set notebook. Applies the four tiered feature builders from `src/features/backblaze_smart.py` (Tier 1 pre-event SMART signals, zero-inflation indicators, degradation-onset timing, manufacturer, capacity; Tier 2 rolling location and upper-quantile statistics and rate-of-change; Tier 3 drift-aware cohort features and era-gated SMART 187/188) plus the 7/14/30-day multi-horizon targets. Rolling and lag features are computed on full per-drive sequences, so processing is partitioned by a hash of the drive serial (each partition holds complete drive histories) and each partition runs in a subprocess that sorts by `(serial_number, date)`, builds the features, and undersamples via `src/features/sampling.py::build_working_set_backblaze` before writing. Positives are the union of the 30-day pre-failure windows (915,504 rows); the healthy class is undersampled proportionally stratified by drive model and year at 20:1 primary (19,222,288 rows) with 10:1 and 40:1 sensitivity branches (`V46`). The 146-column feature matrix and each working set are written to GCS under `gs://{project_id}-dissertation-data/backblaze_features/working_set_{20,10,40}x/`, with `outputs/features/backblaze_feature_schema.json` and `outputs/tables/backblaze_feature_engineering_verification.csv`.
+
+### `11_preprocessed_eda_backblaze.py`
+
+Validates the Backblaze feature matrix and decides working-set adequacy, the counterpart to the Google notebook 11. A baseline LightGBM predicts the 30-day failure horizon on the 20:1 working set, trained through 2022 and evaluated on a 2023-2025 temporal holdout (the drift-faithful, leakage-safe split), scored by MCC with a bootstrap CI (`src/evaluation/metrics.py`) and PR-AUC. The learning curve asymptotes immediately (`V47`): MCC about 0.611 at 1% of the training data rising only to 0.6124 at 100%, so the working set is adequate and sample size is not the bottleneck. The flat, moderate ceiling (~0.61, no trivial leakage) indicates model tuning, the ensemble, and per-model or per-horizon stratification are the levers for the modeling block. Writes `outputs/tables/backblaze_learning_curve.csv` and `outputs/figures/learning_curve_backblaze.png`.
 
 ## Phase 4: Modeling (Google block complete)
 

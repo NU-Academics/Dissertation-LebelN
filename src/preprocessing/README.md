@@ -1,11 +1,10 @@
 # `src/preprocessing/` - Per-Event Transforms and Lifecycle Reconstruction
 
-Two modules:
+Three modules:
 
-- `google_traces.py`: pure Polars LazyFrame transforms for the per-event preprocessing steps (sentinel filter, failure labeling, MNAR hardware-counter encoding, machine-attribute join).
+- `google_traces.py`: pure Polars LazyFrame transforms for the per-event Google preprocessing steps (sentinel filter, failure labeling, MNAR hardware-counter encoding, machine-attribute join).
 - `lifecycle.py`: BigQuery-backed reconstruction of the per-instance lifecycle summary. Splits out from `google_traces.py` because the SUBMIT / SCHEDULE / terminal join runs across the full 1.72B-row events table and does not fit in Colab memory.
-
-The Backblaze preprocessing module (`backblaze.py`) is planned.
+- `backblaze.py`: pure Polars LazyFrame transforms for the Backblaze row-level preprocessing (SSD exclusion, era assignment, SMART schema reconciliation, availability indicators, drive-model canonicalization, censoring marker).
 
 ## `google_traces.py`
 
@@ -51,6 +50,36 @@ The output schema exposes `submit_time` (microseconds since trace start), satisf
 
 Implements `V09` (rapid-onset failure model), `V10` (resubmission history dominates), and `V29` (V10 reproduction caveats and full-trace contrast). The window-function pattern follows `sql/exploration/instance_lifecycle_reconstruction.sql` Part B; the validated full-trace adaptation lives in `notebooks/08_google_preprocessing.py` Section 5.
 
+## `backblaze.py`
+
+Six pure functions for the Backblaze row-level pass. Each is LazyFrame in, LazyFrame out, no I/O; the calling notebook (`09_backblaze_preprocessing.py`) composes them and owns reads and writes. The SMART schema is not stable across 2013-2025, so reconciliation guarantees a fixed column set and availability indicators mark where a non-universal column was actually collected rather than imputing it.
+
+### `filter_hdds_only(lf, ssd_models=None, model_column="model")`
+
+Drops SSD rows so the modeling axis is HDD-only (the 13-year temporal consistency required for the drift analysis). The daily schema has no drive-type flag, so SSDs are identified by an explicit model set sourced from notebook 05 and passed in by the caller (notebook 09 flags 18 model families by an `SSD` / `DELLBOSS` / `MTFDDAK` / `WDC WDS` token, keeping early Samsung SpinPoint HDDs that a bare-manufacturer match would drop). A `None` or empty set is a no-op.
+
+### `assign_era(lf, era_constants=None, date_column="date", era_column="era")`
+
+Annotates each row with the SMART schema era of its observation date from `BACKBLAZE_ERAS` (`src/data/schemas.py`, `V44`). Dates outside every era range receive `"unknown"` so the caller can triage them.
+
+### `reconcile_smart_schema(lf, smart_ids, keep_normalized=True)`
+
+Guarantees a `smart_{id}_raw` column (and optionally the `_normalized` sibling) for every requested SMART id, adding absent columns as all-null so every cleaned file shares one schema across the evolving years. Absent columns are added as null, never imputed.
+
+### `encode_smart_availability_indicators(lf, smart_ids)`
+
+Adds a `has_smart_{id}` indicator (1 where `smart_{id}_raw` is non-null) for each requested id (`V16`). Whether an era-gated attribute (notably 187 and 188) was collected is itself signal, so the model can use era-gated columns without imputing the periods that did not collect them.
+
+### `canonicalize_drive_model(lf, aliases=None, model_column="model")`
+
+Adds `model_canonical` (optional alias folding, validated in notebook 05) and `manufacturer` (derived from the canonical model-name prefix using the Backblaze naming conventions) (`V18`).
+
+### `mark_censoring(lf, serial_column="serial_number", date_column="date", failure_column="failure")`
+
+Classifies each drive's final observation for the survival framing: `is_last_obs`, `failure_observed` (terminal row with `failure = 1`), and `censored` (drive left the fleet without a recorded failure). Provided for per-drive-scale use; at full population scale notebook 09 computes the terminal table map-reduce style to bound memory.
+
+The paired post-preprocessing assertions live in `src/data/validation.py` (`assert_failure_event_count`, `assert_one_row_per_drive_day`, `assert_era_assignment_complete`, `assert_fleet_expansion`).
+
 ## Tests
 
-`tests/test_preprocessing.py` covers the four pure functions in `google_traces.py` with synthetic LazyFrame fixtures. `tests/test_lifecycle.py` covers the lifecycle reconstruction semantics via a Polars-native reference implementation; the BigQuery-backed path is validated end-to-end against the EDA-confirmed statistics in notebook 08.
+`tests/test_preprocessing.py` covers the four pure functions in `google_traces.py` and the six in `backblaze.py` (a three-era synthetic fixture exercises SSD filtering, era binning, schema reconciliation, availability indicators, the canonicalizer aliases, and the censoring marker, plus the four Backblaze validation asserts). `tests/test_lifecycle.py` covers the lifecycle reconstruction semantics via a Polars-native reference implementation; the BigQuery-backed path is validated end-to-end against the EDA-confirmed statistics in notebook 08.
