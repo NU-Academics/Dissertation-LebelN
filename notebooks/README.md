@@ -2,7 +2,7 @@
 
 Jupytext percent-format `.py` files are the primary work product. Each notebook captures the analytical narrative for one CRISP-DM step and produces the artifacts that downstream notebooks and `src/` modules depend on. `.ipynb` files are generated on demand in Colab and are gitignored.
 
-The decisions audit trail at `outputs/tables/eda_decisions.csv` is the canonical cross-reference for every validated analytical choice (rows `V01` through `V47` at the time of writing, plus the `P` planned and `O` open / resolved rows). When a notebook section references a decision by ID, the CSV is where to read the evidence and the next step.
+The decisions audit trail at `outputs/tables/eda_decisions.csv` is the canonical cross-reference for every validated analytical choice (rows `V01` through `V51` at the time of writing, plus the `P` planned and `O` open / resolved rows). When a notebook section references a decision by ID, the CSV is where to read the evidence and the next step.
 
 ## Phase 2: Data Understanding (complete)
 
@@ -91,7 +91,7 @@ The Backblaze feature-engineering and working-set notebook. Applies the four tie
 
 Validates the Backblaze feature matrix and decides working-set adequacy, the counterpart to the Google notebook 11. A baseline LightGBM predicts the 30-day failure horizon on the 20:1 working set, trained through 2022 and evaluated on a 2023-2025 temporal holdout (the drift-faithful, leakage-safe split), scored by MCC with a bootstrap CI (`src/evaluation/metrics.py`) and PR-AUC. The learning curve asymptotes immediately (`V47`): MCC about 0.611 at 1% of the training data rising only to 0.6124 at 100%, so the working set is adequate and sample size is not the bottleneck. The flat, moderate ceiling (~0.61, no trivial leakage) indicates model tuning, the ensemble, and per-model or per-horizon stratification are the levers for the modeling block. Writes `outputs/tables/backblaze_learning_curve.csv` and `outputs/figures/learning_curve_backblaze.png`.
 
-## Phase 4: Modeling (Google block complete)
+## Phase 4: Modeling (Google and Backblaze RQ1/RQ3 complete)
 
 ### `12_rq1_ensemble_google.py`
 
@@ -113,9 +113,29 @@ RQ4 resource optimization. Compares a reactive baseline against three prediction
 
 Google feature-tier ablation (the Google portion of the cross-cutting ablation notebook). Trains one LightGBM (`src/models/ensemble.py::LightGBMWrapper`) with identical hyperparameters across five feature sets on the RQ1 instance-keyed group split, tuning the threshold on validation and reporting MCC, F1, and PR-AUC with bootstrap CIs on test. At the episode grain: a scheduling-plus-temporal floor (MCC 0.813), plus strictly-prior history (0.915, the dominant incremental lever), plus early-runtime Tier 2 (0.950), plus windowed-utilization Tier 3 (0.969); a Tier 2 null-indicator-only model scores 0.268, showing Tier 2's value is the slope and ramp magnitudes rather than null-as-signal alone. Confirms the `V13` tier hierarchy. Writes `outputs/tables/google_feature_ablation.csv`.
 
+### `10b_backblaze_natural_test.py`
+
+Builds the natural-prevalence 2023-2025 evaluation set. Feature-engineers the year-2023-and-later cleaned data with the four `src/features/backblaze_smart.py` builders, one drive-hash partition per subprocess (features over each drive's full history, then filtered to the test years so the year-boundary rolling windows stay correct), and writes 40 partitions to `gs://{project_id}-dissertation-data/backblaze_features/natural_test_2023_2025/`. 311,209,261 drive-day rows at a 0.0043% failure-day rate (horizon-positive rates 0.032% / 0.060% / 0.125% at 7/14/30 days), 146 columns matching the working set, scored and never trained (`V48`). Verification in `outputs/tables/backblaze_natural_test_verification.csv`.
+
+### `10c_backblaze_natural_val_2022.py`
+
+Builds the natural-prevalence 2022 validation set used to fit the operating threshold and calibration at the true base rate. Same per-partition feature engineering as 10b, filtered to 2022 and uniformly downsampled to about 6M rows (uniform sampling preserves the class balance): 5,999,980 rows, 0.122% positive at the 30-day horizon, 146 columns matching the working set, written to `backblaze_features/natural_val_2022/` (`V48`).
+
+### `12_rq1_ensemble_backblaze.py`
+
+RQ1 multi-horizon Backblaze failure prediction, the sibling of notebook 12 (Google). Reuses `src/models/ensemble.py`, `src/evaluation/metrics.py`, and `src/evaluation/hypothesis.py` unchanged. Trains random forest, balanced random forest, XGBoost, LightGBM, and a soft-voting stack (cost-sensitive, no SMOTE) on the 20:1 working-set rows through 2021 over about 134 numeric features (the notebook 11 exclusion set) plus a leakage-safe drive-model failure-rate prior (target encoding fit on prior years only, resolving `O07` with marginal lift). Threshold and isotonic or Platt calibration are fit on the natural-prevalence 2022 set (10c); evaluation is on the natural-prevalence 2023-2025 set (10b). The >0.90 MCC target is not met at natural prevalence: best is the soft-voting stack at MCC 0.151 / 0.180 / 0.200 for 7/14/30 days, PR-AUC 0.084 / 0.099 / 0.114; MCC rises with horizon and the model prior lifts MCC only through the operating point, leaving PR-AUC unchanged (`V49`). The best calibrated 14-day model is checkpointed for RQ5. Writes `outputs/tables/rq1_backblaze.csv`, `outputs/tables/rq1_backblaze_hypothesis_test.csv`, and PR curves under `outputs/figures/rq1_backblaze/`.
+
+### `12b_backblaze_bridge_singlemodel.py`
+
+Evaluation-design bridge that decomposes the gap between the fleet-wide natural-prevalence result and prior single-model, balanced-test studies. Reuses the shared model and metric modules on one high-volume drive model (ST4000DM000, 14-day horizon), reporting the soft-voting stack under each protocol: fleet natural 0.20, single-model natural 0.22, single-model temporal split at a 14:1 test 0.555, single-model in-era random split at a 14:1 test 0.715 (PR-AUC 0.834). Test balancing contributes about +0.33 MCC, in-era random splitting about +0.16, single-model selection about +0.02; the residual to about 0.95 is per-drive block standardization and five-feature hand-selection used by prior work and not adopted here (`V50`). Writes `outputs/tables/rq1_backblaze_bridge.csv`.
+
+### `14_rq3_leadtime_backblaze.py`
+
+RQ3 lead time (Backblaze), reframing the multi-horizon RQ1 results as the deepest horizon that sustains MCC above 0.80 at natural prevalence. Reads `outputs/tables/rq1_backblaze.csv`, finds that no horizon clears 0.80 (best is the stack at the 30-day horizon, MCC 0.200), reports the two hypothesis tests (the 15-minute target rejected in favor of the model, the 0.80 bar not), and adds a survival view from the per-drive terminal table (30,801 observed failures, 455,452 censored; days-to-failure median 998, IQR 474 to 1671). Usable lead time is discrimination-bound, the mirror image of the Google RQ3 result and the intended cross-dataset complementarity (`V51`, resolving `O09`). Writes `outputs/tables/rq3_backblaze.csv` and `outputs/tables/rq3_backblaze_hypothesis_test.csv`.
+
 ### Remaining Phase 4 onward (planned)
 
-The remaining notebooks cover the Backblaze modeling block (RQ1 multi-horizon and RQ3), the RQ5 online-learning drift simulation (notebook 16), cross-cutting hypothesis testing (notebook 17), the Backblaze portion of the feature ablation, and the Chapter 4 tables/figures regeneration pipeline (notebook 19). Each will get its own narrative-first treatment, with logic moving into `src/` only after the notebook validates it.
+The remaining notebooks cover the RQ5 online-learning drift simulation (notebook 16), cross-cutting hypothesis testing (notebook 17), the Backblaze portion of the feature ablation, and the Chapter 4 tables/figures regeneration pipeline (notebook 19). Each will get its own narrative-first treatment, with logic moving into `src/` only after the notebook validates it.
 
 ## Conventions
 
