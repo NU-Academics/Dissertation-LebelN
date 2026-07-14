@@ -12,6 +12,8 @@ Submodules:
 - hypothesis (populated): one-sample tests against locked thresholds, paired
   Wilcoxon for model-versus-model comparisons, Cohen's d effect sizes,
   family-wise error control (Holm and Benjamini-Hochberg).
-- drift_detectors (planned): ADWIN, Page-Hinkley, KS, PSI detector wrappers for
-  RQ5 drift simulation.
+- drift_detectors (populated): ADWIN and Page-Hinkley over a per-observation loss
+  stream (sudden drift), KS and PSI over a reference-versus-sliding feature window
+  (gradual drift and covariate shift), behind one update / drift_detected /
+  warning_detected / reset interface, plus a standalone PSI function.
 """
