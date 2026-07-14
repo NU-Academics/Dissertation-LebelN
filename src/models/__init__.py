@@ -15,7 +15,12 @@ Submodules (extracted from the per-RQ modeling notebooks):
   Keras NN for RQ2 conflict resolution, reusing the EnsembleWrapper protocol and
   the boundary / save-load from ensemble. Random Forest is reused from ensemble
   (RandomForestWrapper), not duplicated. Extracted from notebook 13.
-- online (planned): River incremental learners (Adaptive Random Forest,
-  Hoeffding Adaptive Tree, Online Gradient Boosting) and online soft-voting
-  ensemble for RQ5 drift adaptation.
+- online (populated): River incremental learners (Adaptive Random Forest,
+  Hoeffding Adaptive Tree, online AdaBoost over Hoeffding trees, incremental
+  logistic regression) plus an online soft-voting ensemble with optional
+  performance-based reweighting, behind one OnlineLearner interface
+  (learn_one / predict_proba_one / predict_proba / save / load) with
+  checkpoint-and-resume. River has no online gradient boosting, so the boosting
+  arm is incremental AdaBoost. Used by RQ5; the static baseline it is compared
+  against is the calibrated ensemble checkpoint from RQ1.
 """
