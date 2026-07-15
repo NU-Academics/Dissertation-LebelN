@@ -20,6 +20,13 @@ arguments (``y_true``, ``y_pred``) are coerced to integer 0/1; score arguments
 The bootstrap point estimates are computed with the same closed-form / scikit-learn
 routines used for the headline number, so the reported point always matches what a
 reader would get from ``sklearn.metrics`` directly.
+
+**Performance under drift.** The second half of the module holds the custom metrics
+for the online-learning question: degradation rate, detection latency, retraining
+effectiveness, sustainment window, and a fixed-prevalence MCC. The last of these
+exists because MCC is prevalence-sensitive and the natural failure rate declines
+across the evaluation years, so a raw year-over-year MCC series confounds prior
+shift with the covariate drift it is meant to measure.
 """
 
 from __future__ import annotations
@@ -152,6 +159,156 @@ def brier_score_with_ci(y_true, y_score, n_boot: int = DEFAULT_N_BOOT, seed: int
         _as_int(y_true), _as_float(y_score),
         lambda yt, ys: float(brier_score_loss(yt, ys)), n_boot, seed, alpha,
     )
+
+
+# ---------------------------------------------------------------------------
+# Custom metrics for performance under concept drift (RQ5)
+# ---------------------------------------------------------------------------
+def performance_degradation_rate(mcc_over_time, months) -> float:
+    """Ordinary-least-squares slope of MCC against time, in MCC units per month.
+
+    Negative means the model is going stale. ``months`` may be dates, datetimes, or
+    a numeric month index; dates are converted to months elapsed from the first
+    entry so the slope is per month regardless of input type. Returns NaN with fewer
+    than two points.
+    """
+    y = _as_float(mcc_over_time)
+    x = _months_elapsed(months)
+    if y.size < 2 or x.size != y.size:
+        return float("nan")
+    if np.all(x == x[0]):
+        return float("nan")
+    slope, _ = np.polyfit(x, y, 1)
+    return float(slope)
+
+
+def drift_detection_latency(detection_time, drift_onset_estimate) -> int:
+    """Days between an estimated drift onset and its detection.
+
+    Negative when the detector fired before the onset estimate, which is a real
+    outcome worth seeing rather than clipping: it means either the detector is
+    firing on noise or the onset estimate is late. The schema-era boundary gives a
+    ground-truth onset date, so this is measurable rather than notional there.
+    """
+    return int((_as_date(detection_time) - _as_date(drift_onset_estimate)).days)
+
+
+def retraining_effectiveness(mcc_pre: float, mcc_post: float, mcc_reference: float) -> float:
+    """Share of lost performance that retraining recovers.
+
+    ``(mcc_post - mcc_pre) / (mcc_reference - mcc_pre)``, where ``mcc_reference`` is
+    the level being recovered *toward*, normally the model's own initial (pre-drift)
+    MCC. 1.0 means full recovery, 0.0 none, negative means retraining made it worse,
+    above 1.0 means it overshot its starting point.
+
+    ``mcc_reference`` must be a reachable level, not the 0.85 hypothesis threshold.
+    Normalizing against an unreachable target would compress every retraining event
+    into an indistinguishable sliver near zero and destroy the metric's ability to
+    discriminate. Returns NaN when there was nothing to recover
+    (``mcc_reference == mcc_pre``).
+    """
+    denominator = float(mcc_reference) - float(mcc_pre)
+    if denominator == 0.0:
+        return float("nan")
+    return float((float(mcc_post) - float(mcc_pre)) / denominator)
+
+
+def performance_sustainment_window(mcc_over_time, threshold: float, months=None) -> int:
+    """Consecutive months of MCC at or above ``threshold`` before the first dip.
+
+    Returns 0 when the series starts below the threshold, which is the expected
+    result against the 0.85 target on this data and is reported as such. The
+    informative version of the metric uses a reachable reference instead, for
+    example ``sustainment_reference(initial_mcc)`` at 80% of the model's own
+    starting MCC. ``months`` is accepted for interface symmetry and is unused: the
+    series is assumed already ordered in time.
+    """
+    y = _as_float(mcc_over_time)
+    below = np.flatnonzero(y < float(threshold))
+    return int(below[0]) if below.size else int(y.size)
+
+
+def sustainment_reference(initial_mcc: float, fraction: float = 0.80) -> float:
+    """A reachable reference level for the sustainment window: a fraction of the
+    model's own initial MCC.
+
+    The 0.85 sustained-MCC target is tested and reported separately. It is not
+    reachable on this data at natural prevalence, where the static baseline starts
+    near 0.20, so a sustainment window defined against it is 0 for every strategy
+    and cannot distinguish them. Defining the window against the model's own
+    starting performance makes the metric informative about *degradation*, which is
+    what the adaptive-versus-static comparison turns on.
+    """
+    return float(fraction) * float(initial_mcc)
+
+
+def mcc_at_fixed_prevalence(y_true, y_pred, target_prevalence: float,
+                            seed: int = DEFAULT_SEED) -> float:
+    """MCC recomputed on a subsample rebalanced to a fixed positive rate.
+
+    MCC is prevalence-sensitive, and the natural failure-day rate *declines* across
+    the evaluation years (0.0048% in 2023 to 0.0037% in 2025). A falling base rate
+    moves MCC on its own, with no change in the covariate distribution and no
+    staleness in the model. Comparing raw per-window MCC across years therefore
+    confounds prior shift with covariate drift.
+
+    This holds prevalence fixed by discarding observations from whichever class is
+    over-represented relative to ``target_prevalence`` (never duplicating any), so a
+    change in the resulting series is attributable to something other than the base
+    rate. Report it alongside the raw series, not instead of it: the raw series is
+    what a deployed model would actually score, and the fixed-prevalence series is
+    what isolates drift.
+    """
+    yt = _as_int(y_true)
+    yp = _as_int(y_pred)
+    pos = np.flatnonzero(yt == 1)
+    neg = np.flatnonzero(yt == 0)
+    if pos.size == 0 or neg.size == 0:
+        return float("nan")
+    if not 0.0 < target_prevalence < 1.0:
+        raise ValueError("target_prevalence must be in (0, 1)")
+
+    rng = np.random.default_rng(seed)
+    # Keep every observation of the limiting class; downsample the other to hit the
+    # target rate exactly (as closely as integer counts allow).
+    n_pos_if_neg_full = int(round(neg.size * target_prevalence / (1 - target_prevalence)))
+    if n_pos_if_neg_full <= pos.size:
+        keep_pos = rng.choice(pos, size=max(n_pos_if_neg_full, 1), replace=False)
+        keep_neg = neg
+    else:
+        n_neg = int(round(pos.size * (1 - target_prevalence) / target_prevalence))
+        keep_pos = pos
+        keep_neg = rng.choice(neg, size=max(min(n_neg, neg.size), 1), replace=False)
+    idx = np.concatenate((keep_pos, keep_neg))
+    return _mcc(yt[idx], yp[idx])
+
+
+def _months_elapsed(months) -> np.ndarray:
+    """Months elapsed from the first entry. Accepts dates, datetimes, or numbers."""
+    seq = list(months)
+    if not seq:
+        return np.asarray([], dtype=np.float64)
+    first = seq[0]
+    if hasattr(first, "year") and hasattr(first, "month"):
+        base = seq[0]
+        return np.asarray(
+            [(d.year - base.year) * 12 + (d.month - base.month) for d in seq],
+            dtype=np.float64,
+        )
+    return _as_float(seq)
+
+
+def _as_date(value):
+    """Coerce a date, datetime, or ISO date string to a ``datetime.date``."""
+    from datetime import date, datetime
+
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, date):
+        return value
+    if isinstance(value, str):
+        return datetime.fromisoformat(value).date()
+    raise TypeError(f"expected a date, datetime, or ISO date string; got {type(value)!r}")
 
 
 def calibration_table(y_true, y_score, n_bins: int = 10) -> pl.DataFrame:
