@@ -6,10 +6,12 @@ Pytest test suite for the extracted `src/` modules. Synthetic Polars LazyFrame f
 
 ```bash
 # From the repo root
-pytest tests/ -v
+python -m pytest -v
 ```
 
-The suite is 104 tests across ten files (locally 95 pass and 9 skip where TensorFlow / XGBoost / LightGBM are absent; all run in Colab):
+Use `python -m pytest`, not a bare `pytest`. The module form binds the run to the active interpreter; a bare `pytest` can resolve to a different environment's console script, which silently skips every test whose optional dependency is installed only in the active one. `pytest.ini` scopes collection to `tests/` because some Jupytext notebook sources match pytest's default `test_*.py` / `*_test.py` patterns and would otherwise be imported and fail on their Colab-only imports.
+
+The suite is 146 tests across twelve files (locally 143 pass and 3 skip where TensorFlow is absent; all run in Colab):
 
 ```
 tests/test_smoke.py              2 tests
@@ -18,10 +20,12 @@ tests/test_lifecycle.py          7 tests
 tests/test_episodes.py           6 tests
 tests/test_sampling.py           8 tests
 tests/test_backblaze_smart.py    5 tests
-tests/test_metrics.py           10 tests
+tests/test_metrics.py           19 tests
 tests/test_hypothesis.py        17 tests
 tests/test_ensemble.py          15 tests
 tests/test_classifier.py        11 tests
+tests/test_drift_detectors.py   19 tests
+tests/test_online.py            23 tests
 ```
 
 To run a single file: `pytest tests/test_preprocessing.py -v`. To run a single test: `pytest tests/test_preprocessing.py::test_failure_label_primary -v`.
@@ -104,9 +108,11 @@ Five unit tests for `src/features/backblaze_smart.py`, using a single date-sorte
 - Tier 3 cohort ages, calendar parts, and the era-availability flags (0 for SMART 187/188 in the recent era, 1 in the standard era).
 - Multi-horizon targets flagging the correct pre-failure window and zero for a never-failing drive.
 
-### `test_metrics.py` (Phase 4)
+### `test_metrics.py` (Phase 4 and Phase 7)
 
-Ten tests for `src/evaluation/metrics.py`: the closed-form MCC / F1 against scikit-learn, the stratified bootstrap returning `(point, ci_low, ci_high)` with the point matching the direct computation, the single-class degenerate path returning NaN bounds, PR-AUC / ROC-AUC / Brier on synthetic predictions, and the `calibration_table` bin structure and observed-versus-predicted columns.
+Nineteen tests for `src/evaluation/metrics.py`. The Phase 4 set covers the closed-form MCC / F1 against scikit-learn, the stratified bootstrap returning `(point, ci_low, ci_high)` with the point matching the direct computation, the single-class degenerate path returning NaN bounds, PR-AUC / ROC-AUC / Brier on synthetic predictions, and the `calibration_table` bin structure and observed-versus-predicted columns.
+
+The Phase 7 set covers the custom drift metrics: a known-slope recovery for `performance_degradation_rate` (with date and numeric month indices), the signed-day and negative-latency cases of `drift_detection_latency`, the no-recovery / full-recovery / overshoot / undefined cases of `retraining_effectiveness`, and the sustainment window. Two tests encode findings rather than mechanics. `test_sustainment_reference_makes_the_window_informative` builds a holding series and a decaying series that are indistinguishable under the 0.85 bar (both 0 months) and separate cleanly under a reachable reference (4 versus 1), which is why `sustainment_reference` exists. `test_fixed_prevalence_mcc_separates_prior_shift_from_covariate_drift` constructs two windows of identical discriminative power at different base rates, confirms the raw MCC moves by more than 0.02 anyway, and confirms the fixed-prevalence MCC agrees within 0.02, which is the guard against reading a declining base rate as model staleness (`V55`).
 
 ### `test_hypothesis.py` (Phase 4)
 
@@ -120,11 +126,18 @@ Fifteen tests for `src/models/ensemble.py`: per-wrapper fit / predict / importan
 
 Eleven tests for `src/models/classifier.py`: fit / predict / importances and save-load round-trips for the Decision Tree and linear SVM, the Polars / NumPy / pandas boundary equivalence, a check that the SVM score is the unbounded decision function (not a [0, 1] probability), the Keras NN fit / predict / save-load and its `NotImplementedError` on feature importances (the three Keras tests skipped when TensorFlow is absent), and the factory error path plus registry completeness.
 
+### `test_drift_detectors.py` (Phase 7)
+
+Nineteen tests for `src/evaluation/drift_detectors.py`. Each detector is driven with a synthetic stream whose change point is known by construction and asserted on three properties: silence before the change, detection within a bounded latency after it, and silence on a matched stationary stream. That third property is the one that matters: both false-alarm guards caught real defects. `test_page_hinkley_is_quiet_on_a_stationary_stream` failed at the library-typical settings (a false drift event at observation 624 on a stream containing no drift), which produced the tuned defaults, and `test_page_hinkley_defaults_keep_the_noise_scale_below_the_threshold` pins the derivation so a future default change trips a test rather than quietly refilling the drift log with noise. `test_psi_refuses_windows_where_its_own_bands_are_noise` locks the constructor guard. Remaining tests cover the shared interface and reset semantics, explicit versus auto-built reference windows, non-finite skipping, and PSI analytic cases including the degenerate all-zero reference that the zero-inflated SMART attributes produce.
+
+### `test_online.py` (Phase 7)
+
+Twenty-three tests for `src/models/online.py`, driven on a small separable synthetic stream. Every learner in the registry is asserted to satisfy the protocol and to beat chance (positives scoring above negatives), which is the guard against a River signature change silently producing a learner that trains but never learns. `test_checkpoint_resumes_exactly_where_it_left_off` is the load-bearing one: a learner checkpointed halfway and resumed must produce predictions identical to one that streamed straight through, because the RQ5 grid cannot fit in a single 12-hour Colab session. Others cover the row-dict boundary (including the null-drop encoding), balanced class weights, prequential ordering (`learn_one` returns self; predicting does not consume the observation), reset, and the soft-voting ensemble in both static and dynamically reweighted modes, including that a deliberately sabotaged member loses weight relative to a healthy one.
+
 ### Planned
 
 - `test_features.py` (Phase 3): the Google Tier 1 / 2 / 3 builders (`historical`, `scheduling`, `temporal`, `runtime`, `utilization`) against synthetic LazyFrames. The Backblaze feature builders are already covered by `test_backblaze_smart.py`.
 - `test_conflict_labels.py` (Phase 4): the RQ2 labelers and the `prior_counts` strict-prior helper (currently validated by hand and in-notebook).
-- `test_drift_detectors.py` (Phase 7): ADWIN, Page-Hinkley, KS, PSI behavior under synthetic drift.
 
 ## Fixture conventions
 
