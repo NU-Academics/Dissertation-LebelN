@@ -96,15 +96,24 @@ def _stratified_bootstrap_ci(
     n_boot: int,
     seed: int,
     alpha: float,
-) -> CI:
+    return_replicates: bool = False,
+) -> CI | tuple[float, float, float, np.ndarray]:
     """Return ``(point, ci_low, ci_high)`` for ``metric_fn(y_true, y_other)`` with a
     stratified percentile bootstrap. ``y_other`` is ``y_pred`` for label metrics or
-    ``y_score`` for score metrics."""
+    ``y_score`` for score metrics.
+
+    With ``return_replicates=True`` the resample distribution is appended as a
+    fourth element ``(point, ci_low, ci_high, replicates)``. A one-sided threshold
+    p-value is read off that same array (see :func:`bootstrap_threshold_pvalue`), so
+    the interval and the p-value come from one resample distribution and cannot
+    disagree. Single-class input yields an empty replicate array."""
     point = float(metric_fn(y_true, y_other))
     pos = np.flatnonzero(y_true == 1)
     neg = np.flatnonzero(y_true == 0)
     if pos.size == 0 or neg.size == 0:
         # Single-class input: the interval is undefined; report the point only.
+        if return_replicates:
+            return point, float("nan"), float("nan"), np.empty(0, dtype=np.float64)
         return point, float("nan"), float("nan")
 
     rng = np.random.default_rng(seed)
@@ -116,6 +125,8 @@ def _stratified_bootstrap_ci(
         )
         boots[b] = metric_fn(y_true[idx], y_other[idx])
     lo, hi = np.percentile(boots, [100 * alpha / 2, 100 * (1 - alpha / 2)])
+    if return_replicates:
+        return point, float(lo), float(hi), boots
     return point, float(lo), float(hi)
 
 
@@ -123,42 +134,81 @@ def _stratified_bootstrap_ci(
 # Public metric-with-CI functions
 # ---------------------------------------------------------------------------
 def mcc_with_ci(y_true, y_pred, n_boot: int = DEFAULT_N_BOOT, seed: int = DEFAULT_SEED,
-                *, alpha: float = DEFAULT_ALPHA) -> CI:
-    """Matthews correlation coefficient with a stratified bootstrap CI."""
-    return _stratified_bootstrap_ci(_as_int(y_true), _as_int(y_pred), _mcc, n_boot, seed, alpha)
+                *, alpha: float = DEFAULT_ALPHA, return_replicates: bool = False) -> CI:
+    """Matthews correlation coefficient with a stratified bootstrap CI.
+
+    With ``return_replicates=True`` returns ``(point, ci_low, ci_high, replicates)``
+    so a one-sided threshold p-value can be read off the same resamples."""
+    return _stratified_bootstrap_ci(_as_int(y_true), _as_int(y_pred), _mcc,
+                                    n_boot, seed, alpha, return_replicates)
 
 
 def f1_with_ci(y_true, y_pred, n_boot: int = DEFAULT_N_BOOT, seed: int = DEFAULT_SEED,
-               *, alpha: float = DEFAULT_ALPHA) -> CI:
+               *, alpha: float = DEFAULT_ALPHA, return_replicates: bool = False) -> CI:
     """Positive-class F1 with a stratified bootstrap CI."""
-    return _stratified_bootstrap_ci(_as_int(y_true), _as_int(y_pred), _f1, n_boot, seed, alpha)
+    return _stratified_bootstrap_ci(_as_int(y_true), _as_int(y_pred), _f1,
+                                    n_boot, seed, alpha, return_replicates)
 
 
 def pr_auc_with_ci(y_true, y_score, n_boot: int = DEFAULT_N_BOOT, seed: int = DEFAULT_SEED,
-                   *, alpha: float = DEFAULT_ALPHA) -> CI:
+                   *, alpha: float = DEFAULT_ALPHA, return_replicates: bool = False) -> CI:
     """Average precision (PR-AUC) with a stratified bootstrap CI."""
     return _stratified_bootstrap_ci(
         _as_int(y_true), _as_float(y_score),
-        lambda yt, ys: float(average_precision_score(yt, ys)), n_boot, seed, alpha,
+        lambda yt, ys: float(average_precision_score(yt, ys)),
+        n_boot, seed, alpha, return_replicates,
     )
 
 
 def roc_auc_with_ci(y_true, y_score, n_boot: int = DEFAULT_N_BOOT, seed: int = DEFAULT_SEED,
-                    *, alpha: float = DEFAULT_ALPHA) -> CI:
+                    *, alpha: float = DEFAULT_ALPHA, return_replicates: bool = False) -> CI:
     """ROC-AUC with a stratified bootstrap CI (complementary baseline)."""
     return _stratified_bootstrap_ci(
         _as_int(y_true), _as_float(y_score),
-        lambda yt, ys: float(roc_auc_score(yt, ys)), n_boot, seed, alpha,
+        lambda yt, ys: float(roc_auc_score(yt, ys)),
+        n_boot, seed, alpha, return_replicates,
     )
 
 
 def brier_score_with_ci(y_true, y_score, n_boot: int = DEFAULT_N_BOOT, seed: int = DEFAULT_SEED,
-                        *, alpha: float = DEFAULT_ALPHA) -> CI:
+                        *, alpha: float = DEFAULT_ALPHA, return_replicates: bool = False) -> CI:
     """Brier score (calibration; lower is better) with a stratified bootstrap CI."""
     return _stratified_bootstrap_ci(
         _as_int(y_true), _as_float(y_score),
-        lambda yt, ys: float(brier_score_loss(yt, ys)), n_boot, seed, alpha,
+        lambda yt, ys: float(brier_score_loss(yt, ys)),
+        n_boot, seed, alpha, return_replicates,
     )
+
+
+# ---------------------------------------------------------------------------
+# One-sided threshold p-value from a bootstrap replicate distribution
+# ---------------------------------------------------------------------------
+def bootstrap_threshold_pvalue(replicates, threshold: float,
+                               *, greater_is_better: bool = True) -> float:
+    """One-sided bootstrap p-value: the share of resamples that fail to clear the target.
+
+    This is the p-value companion to the CI-based decision rule. The threshold test
+    rejects the null only when the whole CI sits on the favourable side of the
+    target; this quantifies *how far* the resample distribution sits from that
+    target, giving the ordering the family-wise correction needs. For a
+    greater-is-better metric with the alternative "metric exceeds ``threshold``" it
+    is ``mean(replicates <= threshold)``; for a less-is-better metric it is
+    ``mean(replicates >= threshold)``.
+
+    Pass the ``replicates`` array from a ``*_with_ci(..., return_replicates=True)``
+    call so the p-value and the reported interval come from the same resamples. A
+    return of ``0.0`` means every resample cleared the target; report it as
+    ``< 1 / n_boot`` rather than as an exact zero, since the bootstrap can only
+    resolve p-values down to its resample count. Non-finite replicates are dropped;
+    an empty (single-class) distribution returns NaN.
+    """
+    reps = _as_float(replicates)
+    reps = reps[np.isfinite(reps)]
+    if reps.size == 0:
+        return float("nan")
+    if greater_is_better:
+        return float(np.mean(reps <= float(threshold)))
+    return float(np.mean(reps >= float(threshold)))
 
 
 # ---------------------------------------------------------------------------
