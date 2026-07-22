@@ -22,6 +22,7 @@ from sklearn.metrics import (
 )
 
 from src.evaluation.metrics import (
+    bootstrap_threshold_pvalue,
     brier_score_with_ci,
     calibration_table,
     drift_detection_latency,
@@ -270,3 +271,53 @@ def test_fixed_prevalence_mcc_is_deterministic_under_a_seed() -> None:
     first = mcc_at_fixed_prevalence(y, p, 0.005, seed=42)
     second = mcc_at_fixed_prevalence(y, p, 0.005, seed=42)
     assert first == second
+
+
+# ---------------------------------------------------------------------------
+# Bootstrap threshold p-value (family-wise correction input)
+# ---------------------------------------------------------------------------
+def test_return_replicates_matches_the_reported_ci(scored) -> None:
+    # The replicate array must be the exact distribution the CI is cut from, so the
+    # p-value and the interval can never disagree.
+    y, pred, _ = scored
+    point, lo, hi, reps = mcc_with_ci(y, pred, n_boot=500, seed=42, return_replicates=True)
+    assert reps.shape == (500,)
+    lo_check, hi_check = np.percentile(reps, [2.5, 97.5])
+    assert lo == pytest.approx(float(lo_check))
+    assert hi == pytest.approx(float(hi_check))
+    # Point and CI are identical to the plain three-tuple call under the same seed.
+    assert (point, lo, hi) == mcc_with_ci(y, pred, n_boot=500, seed=42)
+
+
+def test_bootstrap_pvalue_is_the_share_on_the_wrong_side() -> None:
+    reps = np.array([0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0])
+    # greater-is-better: share at or below the target.
+    assert bootstrap_threshold_pvalue(reps, 0.55, greater_is_better=True) == pytest.approx(0.5)
+    # less-is-better: share at or above the target.
+    assert bootstrap_threshold_pvalue(reps, 0.55, greater_is_better=False) == pytest.approx(0.5)
+    # A target every resample clears yields 0.0 (report as < 1 / n_boot).
+    assert bootstrap_threshold_pvalue(reps, 0.05, greater_is_better=True) == 0.0
+    # A target no resample clears yields 1.0.
+    assert bootstrap_threshold_pvalue(reps, 1.5, greater_is_better=True) == 1.0
+
+
+def test_bootstrap_pvalue_decisive_versus_marginal() -> None:
+    # A decisive case: MCC around 0.95 against a 0.90 target -> essentially no
+    # resample fails, p underflows to 0. A marginal case straddling the target has
+    # a p strictly between 0 and 1.
+    rng = np.random.default_rng(0)
+    decisive = 0.95 + rng.normal(scale=0.005, size=1000)
+    marginal = 0.90 + rng.normal(scale=0.02, size=1000)
+    assert bootstrap_threshold_pvalue(decisive, 0.90) == pytest.approx(0.0, abs=1e-9)
+    p_marg = bootstrap_threshold_pvalue(marginal, 0.90)
+    assert 0.0 < p_marg < 1.0
+
+
+def test_bootstrap_pvalue_drops_nonfinite_and_handles_empty() -> None:
+    reps = np.array([0.1, np.nan, 0.9, np.inf])
+    # Only the two finite values count; one of two is at/below 0.5.
+    assert bootstrap_threshold_pvalue(reps, 0.5, greater_is_better=True) == pytest.approx(0.5)
+    # Single-class input exposes an empty replicate array -> NaN p-value.
+    _, _, _, empty = mcc_with_ci([1, 1, 1, 1], [1, 1, 1, 1], n_boot=50, return_replicates=True)
+    assert empty.size == 0
+    assert math.isnan(bootstrap_threshold_pvalue(empty, 0.9))
