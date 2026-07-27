@@ -415,81 +415,79 @@ for name, imp in member_imp.items():
 # %% [markdown]
 # ## 4. Tier alignment
 #
-# The theoretical ordering for the Google model is that pre-scheduling and
-# historical features dominate the top of the ranking, early-runtime slope and ramp
-# features make a moderate appearance, and traditional utilization features rank low
-# or are absent. Each top-15 feature is classified against that scheme (a missing
-# indicator inherits the tier of its source feature, since null-as-signal is a
-# pre-scheduling observable here). The Google tier scheme does not transfer to the
-# Backblaze SMART feature space, so the Backblaze top-15 is summarized by feature
-# family instead, with the drive-model prior called out separately.
+# Each top-15 feature is classified against the availability-tier scheme its dataset
+# was engineered under. For Google the theoretical ordering is that pre-scheduling
+# and historical features dominate, early-runtime slope and ramp features are
+# moderate, and traditional utilization features are low or absent; a missing
+# indicator inherits its source feature's tier, since null-as-signal is a
+# pre-scheduling observable here, and submission-time temporal encodings are
+# pre-scheduling (tier1). For Backblaze the tiers follow the SMART feature module:
+# tier1 is zero-inflation indicators and degradation-onset timing and manufacturer
+# and capacity, tier2 is the rolling and quantile and rate-of-change dynamics, tier3
+# is drive and fleet age and calendar and the era-gated attributes. Two families sit
+# outside those engineered tiers and are reported on their own: the raw current SMART
+# readings, and the leakage-safe drive-model prior.
 
 # %%
-TIER1 = ("prior_fail", "has_prior", "resubmission", "prior_evict", "lifecycle",
-         "has_hardware_counters", "workload", "priority", "scheduling_class",
-         "platform", "cpu_request", "memory_request", "queue_time")
-TIER2 = ("slope", "ramp", "first_interval", "cpi", "mapi", "sequence_complexity",
-         "running_duration", "initial_")
-TIER3 = ("avg_cpu", "avg_memory", "max_cpu", "max_memory", "avg_", "max_", "util")
+G_TIER1 = ("prior_fail", "has_prior", "resubmission", "prior_evict", "lifecycle",
+           "has_hardware_counters", "workload", "priority", "scheduling_class",
+           "platform", "cpu_request", "memory_request", "request_ratio",
+           "queue_time", "submit")
+G_TIER2 = ("slope", "ramp", "first_interval", "cpi", "mapi", "sequence_complexity",
+           "running_duration", "initial_")
+G_TIER3 = ("avg_cpu", "avg_memory", "max_cpu", "max_memory", "_util", "util_")
 
 
 def google_tier(feature: str) -> str:
     base = feature[:-len("__missing")] if feature.endswith("__missing") else feature
     low = base.lower()
-    if any(k in low for k in TIER1):
+    if any(k in low for k in G_TIER1):
         return "tier1"
-    if any(k in low for k in TIER2):
+    if any(k in low for k in G_TIER2):
         return "tier2"
-    if any(k in low for k in TIER3):
+    if any(k in low for k in G_TIER3):
         return "tier3"
     return "unclassified"
 
 
-g_top = g_imp.head(15).with_columns(
-    pl.col("feature").map_elements(google_tier, return_dtype=pl.Utf8).alias("tier"))
-g_tier_prop = (g_top.group_by("tier").len()
-               .with_columns((pl.col("len") / g_top.height).alias("proportion"))
-               .sort("tier"))
-print("Google top-15 tier classification:")
-print(g_top)
-print(g_tier_prop)
-
-
-def backblaze_family(feature: str) -> str:
+def backblaze_tier(feature: str) -> str:
+    """Classify a Backblaze feature by the tiers in src/features/backblaze_smart.py,
+    plus two buckets outside the engineered tiers: the raw SMART readings and the
+    drive-model prior."""
     low = feature.lower()
     if low == "model_prior":
         return "drive_model_prior"
-    if any(k in low for k in ("slope", "delta", "rate", "roc", "change")):
-        return "rate_of_change"
-    if any(k in low for k in ("p95", "p99", "quantile", "q95", "q99")):
-        return "upper_quantile"
-    if any(k in low for k in ("roll", "mean", "std", "min", "max", "median")):
-        return "rolling_stat"
-    if low.startswith("has_") or "nonzero" in low:
-        return "presence_indicator"
-    return "smart_raw"
+    if ("days_since_first_nonzero" in low or low.startswith("has_nonzero_smart")
+            or low.startswith("is_mfr_") or low.startswith("capacity")):
+        return "tier1"
+    if any(k in low for k in ("rollmean", "rollp95", "rollp99", "rollstd", "_delta_")):
+        return "tier2"
+    if low in ("fleet_age_days", "drive_age_days", "year", "month", "quarter") \
+            or low.startswith("era_smart"):
+        return "tier3"
+    if low.startswith("smart_") and low.endswith("_raw"):
+        return "raw_smart"
+    return "unclassified"
 
 
-b_top = b_imp.head(15).with_columns(
-    pl.col("feature").map_elements(backblaze_family, return_dtype=pl.Utf8).alias("family"))
-b_family_prop = (b_top.group_by("family").len()
-                 .with_columns((pl.col("len") / b_top.height).alias("proportion"))
-                 .sort("family"))
-print("\nBackblaze top-15 family classification:")
-print(b_top)
-print(b_family_prop)
+def classify_top(imp: pl.DataFrame, classifier, dataset: str, scheme: str, top: int = 15):
+    value_col = imp.columns[1]
+    top_df = imp.head(top).with_columns(
+        pl.col("feature").map_elements(classifier, return_dtype=pl.Utf8).alias("class"))
+    prop = (top_df.group_by("class").len()
+            .with_columns((pl.col("len") / top_df.height).alias("proportion"))
+            .sort("proportion", descending=True))
+    print(f"\n{dataset} top-{top} classification:")
+    print(top_df.select(["feature", value_col, "class"]))
+    print(prop)
+    return (prop.rename({"len": "n_in_top15"})
+            .with_columns(dataset=pl.lit(dataset), scheme=pl.lit(scheme))
+            .select(["dataset", "scheme", "class", "n_in_top15", "proportion"]))
 
-# One table, both datasets. The Google rows carry a tier; the Backblaze rows carry a
-# feature family (the Google tier column is null for them and vice versa).
-tier_rows = (
-    g_tier_prop.rename({"tier": "class", "len": "n_in_top15"})
-    .with_columns(dataset=pl.lit("rq1_google"), scheme=pl.lit("google_tier"))
-    .select(["dataset", "scheme", "class", "n_in_top15", "proportion"]))
-fam_rows = (
-    b_family_prop.rename({"family": "class", "len": "n_in_top15"})
-    .with_columns(dataset=pl.lit("rq1_backblaze"), scheme=pl.lit("feature_family"))
-    .select(["dataset", "scheme", "class", "n_in_top15", "proportion"]))
-tier_alignment = pl.concat([tier_rows, fam_rows], how="vertical")
+
+g_rows = classify_top(g_imp, google_tier, "rq1_google", "google_tier")
+b_rows = classify_top(b_imp, backblaze_tier, "rq1_backblaze", "backblaze_tier")
+tier_alignment = pl.concat([g_rows, b_rows], how="vertical")
 tier_alignment.write_csv(TABLES_DIR / "tier_alignment.csv")
 print("\nWrote tier_alignment.csv")
 print(tier_alignment)
