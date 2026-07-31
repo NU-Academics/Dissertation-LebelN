@@ -1,0 +1,13 @@
+feature_set,n_features,metric,value,ci_low,ci_high,threshold
+tier1,67,mcc,0.1418,0.133,0.1503,0.0561
+tier1,67,f1,0.1083,0.1017,0.1147,0.0561
+tier1,67,pr_auc,0.054,0.0474,0.0619,0.0561
+tier1_tier2,129,mcc,0.1727,0.1628,0.1822,0.047
+tier1_tier2,129,f1,0.1312,0.1238,0.1384,0.047
+tier1_tier2,129,pr_auc,0.0931,0.0816,0.1041,0.047
+all_tiers,134,mcc,0.164,0.1542,0.173,0.0446
+all_tiers,134,f1,0.1222,0.1151,0.1287,0.0446
+all_tiers,134,pr_auc,0.0864,0.0756,0.0975,0.0446
+all_tiers_plus_prior,135,mcc,0.1778,0.1676,0.1877,0.0407
+all_tiers_plus_prior,135,f1,0.1482,0.1396,0.156,0.0407
+all_tiers_plus_prior,135,pr_auc,0.0899,0.0804,0.1022,0.0407

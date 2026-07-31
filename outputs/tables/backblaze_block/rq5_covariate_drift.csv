@@ -1,0 +1,13 @@
+feature,detector,onset,detected,latency_days,statistic
+smart_197_raw,ks,2021-04-01,,,0.0118
+smart_197_raw,psi,2021-04-01,,,0.0
+smart_5_raw,ks,2021-04-01,2022-05-10,404,0.0288
+smart_5_raw,psi,2021-04-01,,,0.0
+smart_198_raw,ks,2021-04-01,,,0.0146
+smart_198_raw,psi,2021-04-01,,,0.0
+smart_187_raw,ks,2021-04-01,2022-04-30,394,0.0114
+smart_187_raw,psi,2021-04-01,,,0.0
+smart_188_raw,ks,2021-04-01,2022-05-04,398,0.0484
+smart_188_raw,psi,2021-04-01,,,0.0
+model_prior,ks,2021-04-01,2021-01-19,-72,0.3636
+model_prior,psi,2021-04-01,2021-01-19,-72,0.9031951396555458
