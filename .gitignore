@@ -66,6 +66,11 @@ outputs/fragments/*
 !outputs/tables/backblaze_block/**
 !outputs/tables/evaluation/
 !outputs/tables/evaluation/**
+!outputs/tables/chapter4_final/
+!outputs/tables/chapter4_final/**
+!outputs/figures/chapter4_final/
+!outputs/figures/chapter4_final/**
+!outputs/manifest_chapter4.json
 
 # Scratch: local notes only, not committed
 scratch/

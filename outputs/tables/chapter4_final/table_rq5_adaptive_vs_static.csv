@@ -1,0 +1,4 @@
+training_frozen_at,static_mean_mcc,online_mean_mcc,static_degradation_per_month,online_degradation_per_month,static_sustainment_months,online_sustainment_months
+2015,0.1141,0.0948,-0.00174,+0.00059,2,0
+2018,0.0944,0.0895,-0.00149,-0.00014,0,3
+2021,0.1838,0.0988,-0.00226,+0.00002,3,6

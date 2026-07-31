@@ -1,0 +1,7 @@
+training_frozen_at,strategy,time_averaged_mcc_95ci,time_averaged_mcc_fixed_prevalence,initial_to_final_mcc,degradation_per_month_fixed_prevalence,sustainment_months_vs_own_reference,meets_0.85
+2015,incremental_online,"0.0948 [0.0863, 0.1034]",0.0965,0.0917 to 0.0653,+0.00059,0,false
+2015,static_baseline,"0.1141 [0.0936, 0.1371]",0.1109,0.1946 to 0.0727,-0.00174,2,false
+2018,incremental_online,"0.0895 [0.0791, 0.1005]",0.0897,0.1181 to 0.0622,-0.00014,3,false
+2018,static_baseline,"0.0944 [0.0736, 0.1193]",0.0895,0.1584 to 0.0436,-0.00149,0,false
+2021,incremental_online,"0.0988 [0.0877, 0.1098]",0.0985,0.1056 to 0.0732,+0.00002,6,false
+2021,static_baseline,"0.1838 [0.1648, 0.2025]",0.1856,0.2269 to 0.0947,-0.00226,3,false

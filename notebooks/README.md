@@ -2,7 +2,7 @@
 
 Jupytext percent-format `.py` files are the primary work product. Each notebook captures the analytical narrative for one CRISP-DM step and produces the artifacts that downstream notebooks and `src/` modules depend on. `.ipynb` files are generated on demand in Colab and are gitignored.
 
-The decisions audit trail at `outputs/tables/eda_decisions.csv` is the canonical cross-reference for every validated analytical choice (rows `V01` through `V51` at the time of writing, plus the `P` planned and `O` open / resolved rows). When a notebook section references a decision by ID, the CSV is where to read the evidence and the next step.
+The decisions audit trail at `outputs/tables/eda_decisions.csv` is the canonical cross-reference for every validated analytical choice (rows `V01` through `V59`, plus the `P` planned and `O` open / resolved rows). When a notebook section references a decision by ID, the CSV is where to read the evidence and the next step.
 
 ## Phase 2: Data Understanding (complete)
 
@@ -155,9 +155,11 @@ Backblaze feature-tier ablation and working-set sensitivity at the 14-day horizo
 
 Google Production-EVICT label sensitivity. Tests whether counting Production-priority EVICTs (type 4, priority 120 to 359) as failures changes the at-submission result. A cheap event-grain count settles it as a bounded analysis: Production-priority evictions are 0.1306% of all evictions and 0.71% of FAIL/LOST, and only nine instances in the trace ever terminate on one because production priority structurally protects against preemption, so the sub-one-percent perturbation cannot move the headline. The full extended-terminal re-train (segmenting episodes from `instance_events_labeled` with the Production-EVICT terminals added as positives via the `prod_evict` sensitivity label, then retraining the at-submission learner) is implemented and left available behind a flag. Appends the `google_prod_evict` row to `outputs/tables/sensitivity_analyses.csv` (`V58`).
 
-### Remaining Phase 6 (planned)
+## Phase 6: Deployment (complete)
 
-Only the Chapter 4 tables/figures regeneration pipeline (notebook 19) remains. It treats the frozen result tables and figures as inputs and regenerates the committee-facing artifacts alongside the TRIPOD+AI reporting checklist; no new analysis happens in Phase 6.
+### `19_tables_figures.py`
+
+Chapter 4 tables and figures regeneration pipeline, the single source of truth for the committee-facing artifact set. Reads only frozen artifacts: tables resolve from the tracked snapshots first (`outputs/tables/google_block/`, `backblaze_block/`, `evaluation/`), then the tracked top-level tables, then the untracked working copies, and any working copy that has drifted from its snapshot is reported while the snapshot is read. Tables and figures whose data live in frozen CSVs are re-rendered with one shared style; figures whose per-observation data were never tabled (probability curves, calibration reliability, confusion panels, SHAP beeswarms) are carried forward byte for byte with source checksums, with the SHAP run stamp pinned from the evaluation snapshot's metadata so a stray later SHAP run cannot be picked up silently. Writes 14 tables to `outputs/tables/chapter4_final/`, 45 figures to `outputs/figures/chapter4_final/`, and `outputs/manifest_chapter4.json` (generating commit, library versions, SHA-256 of every input and output). Hermetic and deterministic: a missing input fails loudly, and re-running from deleted output directories reproduces every artifact byte for byte. No new analysis (`V59`).
 
 ## Conventions
 

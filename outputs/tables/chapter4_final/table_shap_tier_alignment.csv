@@ -1,0 +1,8 @@
+model_block,feature_class,features_in_shap_top15,share_of_top15
+rq1_google,tier1,13,86.7%
+rq1_google,tier2,2,13.3%
+rq1_backblaze,raw_smart,6,40.0%
+rq1_backblaze,tier2,4,26.7%
+rq1_backblaze,tier1,3,20.0%
+rq1_backblaze,drive_model_prior,1,6.7%
+rq1_backblaze,tier3,1,6.7%

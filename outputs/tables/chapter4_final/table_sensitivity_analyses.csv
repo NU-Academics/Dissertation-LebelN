@@ -1,0 +1,5 @@
+branch,dataset,comparison,result,difference_straddles_zero
+working_set_10x,backblaze,"soft_voting_stack, 14-day horizon, natural prevalence","MCC 0.1828 [0.1724, 0.1944]; difference from primary +0.0041 [-0.0013, +0.0108]",true
+working_set_20x,backblaze,"soft_voting_stack, 14-day horizon, natural prevalence","MCC 0.1787 [0.1674, 0.1882]; difference from primary +0.0000 [+0.0000, +0.0000]",true
+working_set_40x,backblaze,"soft_voting_stack, 14-day horizon, natural prevalence","MCC 0.1784 [0.1673, 0.1888]; difference from primary -0.0003 [-0.0061, +0.0056]",true
+google_prod_evict,google,at-submission relabeling bound (no re-train),"Bounded analysis: Production-priority EVICTs are 0.13% of evictions (152,925 events, 0.71% of FAIL/LOST); relabeling adds under 1% hard positives, so the at-submission decision is unaffected",""

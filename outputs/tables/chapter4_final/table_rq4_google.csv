@@ -1,0 +1,4 @@
+strategy,median_efficiency_improvement_95ci,windows_improved,allocation_reclaimed,wilcoxon_p_vs_25pct,decision_vs_25pct
+preemptive_migration,"0.0693 [0.0525, 0.0878]",93.1%,19.6%,> .999,fail to reject H0 (no detected difference)
+admission_control,"0.0643 [0.0519, 0.0816]",93.8%,17.7%,> .999,fail to reject H0 (no detected difference)
+capacity_aware_bin_packing,"0.0153 [0.0123, 0.0185]",93.1%,4.6%,> .999,fail to reject H0 (no detected difference)

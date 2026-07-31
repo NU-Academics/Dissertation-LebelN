@@ -1,0 +1,8 @@
+model,best_horizon_days,best_mcc_95ci,best_pr_auc,max_horizon_days_at_mcc_gt_0.80,meets_15_min_lead
+soft_voting_stack,30,"0.1996 [0.1913, 0.2065]",0.1141,none,true
+lightgbm,30,"0.1961 [0.1885, 0.2020]",0.1001,none,true
+xgboost,30,"0.1953 [0.1863, 0.2008]",0.1020,none,true
+balanced_random_forest,30,"0.1819 [0.1753, 0.1872]",0.0840,none,true
+decision_tree,30,"0.1667 [0.1599, 0.1719]",0.0513,none,true
+logistic_regression,30,"0.0000 [0.0000, 0.0000]",0.0013,none,true
+most_frequent,7,"0.0000 [0.0000, 0.0000]",0.0003,none,true

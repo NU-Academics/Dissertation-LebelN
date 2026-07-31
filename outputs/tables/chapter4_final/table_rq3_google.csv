@@ -1,0 +1,5 @@
+level,aggregation,median_lead_time_min_95ci,collection_mcc_95ci,target_min,decision
+attempt,none,"3.448 [3.296, 3.620]","",15,fail to reject H0
+collection,max,"0.511 [0.502, 0.520]","0.8705 [0.8644, 0.8771]",15,fail to reject H0
+collection,mean,"0.512 [0.503, 0.521]","0.8345 [0.8276, 0.8423]",15,fail to reject H0
+collection,top3_mean,"0.511 [0.502, 0.520]","0.8678 [0.8616, 0.8740]",15,fail to reject H0
