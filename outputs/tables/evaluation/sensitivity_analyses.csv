@@ -1,0 +1,5 @@
+branch,dataset,model,horizon,mcc,ci_low,ci_high,delta_from_primary,delta_ci_low,delta_ci_high,difference_straddles_zero,method,prod_evict_events,prod_evict_share_of_evicts,positives_added_share_of_faillost,note
+working_set_10x,backblaze,soft_voting_stack,14,0.1828,0.1724,0.1944,0.0041,-0.0013,0.0108,true,,,,,
+working_set_20x,backblaze,soft_voting_stack,14,0.1787,0.1674,0.1882,0.0,0.0,0.0,true,,,,,
+working_set_40x,backblaze,soft_voting_stack,14,0.1784,0.1673,0.1888,-0.0003,-0.0061,0.0056,true,,,,,
+google_prod_evict,google,at_submission_bounded,,,,,,,,true,bounded_no_retrain,152925,0.001306,0.0071,"Production-priority EVICTs are 0.13% of evictions and 0.71% of FAIL/LOST; relabeling adds <1% hard positives; at-submission already fails 0.90 (0.9006, CI low 0.8988), decision unaffected. Full re-train available via RUN_BUILD."

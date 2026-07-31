@@ -1,0 +1,11 @@
+rq,role,dataset,prediction_point,model,headline_metric,value,ci_low,ci_high,threshold,greater_is_better,margin,std_distance_from_threshold,raw_p,holm_adjusted_p,bh_adjusted_p,holm_reject,bh_reject,native_p,decision
+RQ1,primary,Google,early_runtime,random_forest,mcc,0.9476,0.9463,0.9491,0.9,true,0.04630000000000001,66.63877547436121,0.0,0.0,0.0,true,true,,reject H0
+RQ2,primary,Google,priority_inversion,decision_tree,mcc,0.8622,0.8108,0.9068,0.8,true,0.01079999999999992,2.5397866632998145,0.005546005229442514,0.022184020917770057,0.013865013073606285,true,true,,reject H0
+RQ3,primary,Google,collection_max,collection_lead_time,lead_time_minutes,0.511,0.502,0.52,15.0,true,-14.498,-3155.3242413334247,1.0,1.0,1.0,false,false,,fail to reject H0
+RQ4,primary,Google,preemptive_migration,preemptive_migration,efficiency_improvement,0.0693,0.0525,0.0878,0.25,true,-0.1975,-20.066033541438397,1.0,1.0,1.0,false,false,0.9999912940975885,fail to reject H0
+RQ5,primary,Backblaze,2021_static_baseline,static_baseline,time_averaged_mcc,0.18376514962870535,0.164802543717438,0.20249420326677783,0.85,true,-0.685197456282562,-69.2883427042437,1.0,1.0,1.0,false,false,,fail to reject H0
+RQ1,secondary,Google,at_submission,soft_voting_top3[random_forest+balanced_random_forest+lightgbm],mcc,0.9006,0.8988,0.9026,0.9,true,-0.0011999999999999789,0.6189359951178576,0.2679792622977465,,,,,,fail to reject H0
+RQ1,secondary,Google,at_scheduling,balanced_random_forest,mcc,0.9024,0.9004,0.9043,0.9,true,0.00039999999999995595,2.412263365587707,0.007926912485623466,,,,,,reject H0
+RQ1,secondary,Backblaze,14d,soft_voting_stack,mcc,0.179823778969325,0.17223046520272117,0.18784447805841578,0.9,true,-0.7277695347972788,-180.80162592251014,1.0,,,,,,fail to reject H0
+RQ3,secondary,Backblaze,best_horizon_mcc,best_horizon,best_mcc,0.19961573091615054,0.1913090720932805,0.20649255397285626,0.8,true,-0.6086909279067195,-155.00154096691654,1.0,,,,,,fail to reject H0
+RQ3,secondary,Backblaze,15_minute_lead,daily_telemetry,lead_time_minutes,43200.0,43200.0,43200.0,15.0,true,43185.0,NaN,0.0,,,,,,reject H0

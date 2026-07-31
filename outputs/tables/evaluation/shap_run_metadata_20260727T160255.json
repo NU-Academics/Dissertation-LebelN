@@ -1,0 +1,22 @@
+{
+  "created_at": "2026-07-27T16:02:55+0000",
+  "seed": 42,
+  "shap_rows_target": 3000,
+  "shap_approximate": true,
+  "shap_version": "0.52.0",
+  "numpy_version": "2.0.2",
+  "google_model": "random_forest",
+  "google_shap_rows": 3000,
+  "google_n_features_expanded": 51,
+  "backblaze_members": [
+    "xgboost",
+    "lightgbm",
+    "random_forest"
+  ],
+  "backblaze_shap_rows": 15000,
+  "backblaze_model_prior_stack_rank": 1,
+  "figures": {
+    "rq1_google": "/content/drive/MyDrive/Dissertation_Colab/outputs/figures/shap/rq1_google",
+    "rq1_backblaze": "/content/drive/MyDrive/Dissertation_Colab/outputs/figures/shap/rq1_backblaze"
+  }
+}
