@@ -62,6 +62,10 @@ outputs/fragments/*
 !outputs/tables/google_block/
 !outputs/tables/google_block/**
 !outputs/figures/.gitkeep
+!outputs/tables/backblaze_block/
+!outputs/tables/backblaze_block/**
+!outputs/tables/evaluation/
+!outputs/tables/evaluation/**
 
 # Scratch: local notes only, not committed
 scratch/
