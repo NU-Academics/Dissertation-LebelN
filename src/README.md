@@ -39,6 +39,6 @@ Functions in `src/preprocessing/*.py` and `src/features/*.py` take Polars LazyFr
 
 ## Test coverage
 
-`tests/test_smoke.py` verifies every subpackage imports cleanly. Per-module tests (`tests/test_preprocessing.py` for both the Google and Backblaze preprocessing transforms, `tests/test_lifecycle.py`, `tests/test_sampling.py` for both working-set samplers, `tests/test_backblaze_smart.py` for the Backblaze SMART features, and the model / evaluation tests, with a Google Tier `test_features.py` still planned) verify the algorithmic semantics against synthetic Polars frames hand-crafted to hit each branch.
+`tests/test_smoke.py` verifies every subpackage imports cleanly. Per-module tests (`tests/test_preprocessing.py` for both the Google and Backblaze preprocessing transforms, `tests/test_lifecycle.py`, `tests/test_sampling.py` for both working-set samplers, `tests/test_backblaze_smart.py` for the Backblaze SMART features, and the model and evaluation tests) verify the algorithmic semantics against synthetic Polars frames hand-crafted to hit each branch. The Google Tier 1/2/3 feature builders (`historical.py`, `scheduling.py`, `runtime.py`, `temporal.py`, `utilization.py`) are exercised through the feature-engineering notebooks and the `src/data/validation.py` assertion suite rather than a dedicated `test_features.py`.
 
 See `tests/README.md` for the test inventory and how to run the suite.

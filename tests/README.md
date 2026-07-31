@@ -11,7 +11,7 @@ python -m pytest -v
 
 Use `python -m pytest`, not a bare `pytest`. The module form binds the run to the active interpreter; a bare `pytest` can resolve to a different environment's console script, which silently skips every test whose optional dependency is installed only in the active one. `pytest.ini` scopes collection to `tests/` because some Jupytext notebook sources match pytest's default `test_*.py` / `*_test.py` patterns and would otherwise be imported and fail on their Colab-only imports.
 
-The suite is 146 tests across twelve files (locally 143 pass and 3 skip where TensorFlow is absent; all run in Colab):
+The suite is 159 tests across twelve files (locally, the tests that require TensorFlow, XGBoost, LightGBM, or River skip when those libraries are absent; all run in Colab):
 
 ```
 tests/test_smoke.py              2 tests
@@ -20,7 +20,7 @@ tests/test_lifecycle.py          7 tests
 tests/test_episodes.py           6 tests
 tests/test_sampling.py           8 tests
 tests/test_backblaze_smart.py    5 tests
-tests/test_metrics.py           19 tests
+tests/test_metrics.py           23 tests
 tests/test_hypothesis.py        17 tests
 tests/test_ensemble.py          15 tests
 tests/test_classifier.py        11 tests
@@ -28,7 +28,7 @@ tests/test_drift_detectors.py   19 tests
 tests/test_online.py            23 tests
 ```
 
-To run a single file: `pytest tests/test_preprocessing.py -v`. To run a single test: `pytest tests/test_preprocessing.py::test_failure_label_primary -v`.
+To run a single file: `python -m pytest tests/test_preprocessing.py -v`. To run a single test: `python -m pytest tests/test_preprocessing.py::test_failure_label_primary -v`.
 
 ## Test inventory
 
@@ -108,11 +108,13 @@ Five unit tests for `src/features/backblaze_smart.py`, using a single date-sorte
 - Tier 3 cohort ages, calendar parts, and the era-availability flags (0 for SMART 187/188 in the recent era, 1 in the standard era).
 - Multi-horizon targets flagging the correct pre-failure window and zero for a never-failing drive.
 
-### `test_metrics.py` (Phase 4 and Phase 7)
+### `test_metrics.py` (Phase 4, Phase 5, and Phase 7)
 
-Nineteen tests for `src/evaluation/metrics.py`. The Phase 4 set covers the closed-form MCC / F1 against scikit-learn, the stratified bootstrap returning `(point, ci_low, ci_high)` with the point matching the direct computation, the single-class degenerate path returning NaN bounds, PR-AUC / ROC-AUC / Brier on synthetic predictions, and the `calibration_table` bin structure and observed-versus-predicted columns.
+Twenty-three tests for `src/evaluation/metrics.py`. The Phase 4 set covers the closed-form MCC / F1 against scikit-learn, the stratified bootstrap returning `(point, ci_low, ci_high)` with the point matching the direct computation, the single-class degenerate path returning NaN bounds, PR-AUC / ROC-AUC / Brier on synthetic predictions, and the `calibration_table` bin structure and observed-versus-predicted columns.
 
 The Phase 7 set covers the custom drift metrics: a known-slope recovery for `performance_degradation_rate` (with date and numeric month indices), the signed-day and negative-latency cases of `drift_detection_latency`, the no-recovery / full-recovery / overshoot / undefined cases of `retraining_effectiveness`, and the sustainment window. Two tests encode findings rather than mechanics. `test_sustainment_reference_makes_the_window_informative` builds a holding series and a decaying series that are indistinguishable under the 0.85 bar (both 0 months) and separate cleanly under a reachable reference (4 versus 1), which is why `sustainment_reference` exists. `test_fixed_prevalence_mcc_separates_prior_shift_from_covariate_drift` constructs two windows of identical discriminative power at different base rates, confirms the raw MCC moves by more than 0.02 anyway, and confirms the fixed-prevalence MCC agrees within 0.02, which is the guard against reading a declining base rate as model staleness (`V55`).
+
+The Phase 5 set covers the bootstrap threshold p-value added for the family-wise correction: `test_return_replicates_matches_the_reported_ci` confirms the exposed replicate array is the exact distribution the reported interval is cut from (so the interval and the p-value cannot disagree), `test_bootstrap_pvalue_is_the_share_on_the_wrong_side` checks the greater-is-better and less-is-better shares and the 0.0 and 1.0 boundaries, `test_bootstrap_pvalue_decisive_versus_marginal` verifies a decisive case underflows to zero while a marginal case lands strictly between zero and one, and `test_bootstrap_pvalue_drops_nonfinite_and_handles_empty` covers non-finite filtering and the single-class empty-replicate NaN (`V56`).
 
 ### `test_hypothesis.py` (Phase 4)
 
